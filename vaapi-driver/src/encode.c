@@ -64,10 +64,18 @@ VAStatus dmd_encode_begin(VADriverContextP ctx, VAContextID context,
         return VA_STATUS_ERROR_INVALID_CONTEXT;
     }
     if (!s || s->format != VA_RT_FORMAT_YUV420 || !s->data) {
+        dmd_log("encode BeginPicture: invalid surface id=%u found=%d format=0x%x data=%p\n",
+                (unsigned)render_target, s != NULL,
+                s ? s->format : 0, s ? (void *)s->data : NULL);
         pthread_mutex_unlock(&drv->lock);
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
-    if (s->width != c->picture_width || s->height != c->picture_height) {
+    if (s->width != c->picture_width || s->height > c->picture_height ||
+        s->buf_width < dmd_align_up(c->picture_width, DMD_WIDTH_ALIGN) ||
+        s->buf_height < dmd_align_up(c->picture_height, DMD_HEIGHT_ALIGN)) {
+        dmd_log("encode BeginPicture: size mismatch id=%u surface=%ux%u context=%ux%u\n",
+                (unsigned)render_target, s->width, s->height,
+                c->picture_width, c->picture_height);
         pthread_mutex_unlock(&drv->lock);
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
@@ -81,7 +89,14 @@ VAStatus dmd_encode_begin(VADriverContextP ctx, VAContextID context,
         s = dmd_find_surface_locked(drv, render_target);
         if (!c || c->entrypoint != VAEntrypointEncSlice || !s ||
             s->format != VA_RT_FORMAT_YUV420 || !s->data ||
-            s->width != c->picture_width || s->height != c->picture_height) {
+            s->width != c->picture_width || s->height > c->picture_height ||
+            s->buf_width < dmd_align_up(c->picture_width, DMD_WIDTH_ALIGN) ||
+            s->buf_height < dmd_align_up(c->picture_height, DMD_HEIGHT_ALIGN)) {
+            dmd_log("encode BeginPicture: waited surface invalid id=%u found=%d size=%ux%u context=%ux%u format=0x%x data=%p\n",
+                    (unsigned)render_target, s != NULL,
+                    s ? s->width : 0, s ? s->height : 0,
+                    c ? c->picture_width : 0, c ? c->picture_height : 0,
+                    s ? s->format : 0, s ? (void *)s->data : NULL);
             pthread_mutex_unlock(&drv->lock);
             return VA_STATUS_ERROR_INVALID_SURFACE;
         }
@@ -221,6 +236,11 @@ VAStatus dmd_encode_end(VADriverContextP ctx, VAContextID context)
     } else {
         bitrate = c->enc_hevc_seq.bits_per_second;
         gop = c->enc_hevc_seq.intra_period;
+        if (c->enc_hevc_seq.pic_width_in_luma_samples &&
+            c->enc_hevc_seq.pic_height_in_luma_samples) {
+            visible_width = c->enc_hevc_seq.pic_width_in_luma_samples;
+            visible_height = c->enc_hevc_seq.pic_height_in_luma_samples;
+        }
         force_key = c->enc_hevc_pic.pic_fields.bits.idr_pic_flag;
     }
     VASurfaceID target = c->current_target;

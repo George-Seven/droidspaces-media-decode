@@ -1721,7 +1721,11 @@ int dmd_v4l2_enc_frame(struct dmd_v4l2_enc *e, struct dmd_surface *surface,
         !dst_pts_us || e->stopped ||
         surface->format != VA_RT_FORMAT_YUV420 ||
         surface->width != (unsigned)e->width ||
-        surface->height != (unsigned)e->height)
+        surface->height > (unsigned)e->height ||
+        surface->buf_width < (unsigned)((e->width + 127) & ~127) ||
+        surface->buf_height < (unsigned)((e->height + 31) & ~31) ||
+        surface->stride < (unsigned)((e->width + 127) & ~127) ||
+        surface->slice_height < (unsigned)((e->height + 31) & ~31))
         return -1;
 
     int input_fd = -1;
