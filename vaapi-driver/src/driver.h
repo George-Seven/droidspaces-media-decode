@@ -298,6 +298,7 @@ struct dmd_context {
     unsigned int picture_width;
     unsigned int picture_height;
     uint32_t enc_rate_control;
+    unsigned int enc_qp;
     int flag;
 
     /* Encode state is populated only for VAEntrypointEncSlice contexts.
@@ -757,7 +758,8 @@ struct dmd_v4l2_enc *dmd_v4l2_enc_open(int codec, VAProfile profile,
                                         unsigned int visible_height,
                                         unsigned int bitrate,
                                         unsigned int gop,
-                                        uint32_t rate_control);
+                                        uint32_t rate_control,
+                                        unsigned int qp);
 int dmd_v4l2_enc_frame(struct dmd_v4l2_enc *enc, struct dmd_surface *surface,
                        const void *src, size_t src_size, void *dst,
                        size_t dst_capacity, size_t *dst_size,

@@ -26,6 +26,10 @@ It implements VA coded-buffer synchronization so FFmpeg's normal async depth of 
 can collect the delayed output and drain the final frame. No encoder-specific FFmpeg
 options or environment variables are required.
 
+When no bitrate is specified, FFmpeg selects VAAPI CQP. The driver maps that
+to msm_vidc VBR with the QP requested by VAAPI (26 if none is supplied), because
+the device exposes only CBR/VBR as V4L2 bitrate modes.
+
 ```sh
 LIBVA_DRIVER_NAME=msm_drm ffmpeg \
   -init_hw_device vaapi=va:/dev/dri/renderD128 \

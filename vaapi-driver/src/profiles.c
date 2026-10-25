@@ -280,6 +280,17 @@ static uint32_t rt_formats_for_profile(VAProfile profile)
     return VA_RT_FORMAT_YUV420;
 }
 
+static uint32_t enc_rate_control_for_profile(VAProfile profile)
+{
+    uint32_t modes = VA_RC_CBR | VA_RC_VBR;
+    /* msm_vidc exposes the QP controls needed to emulate CQP for H.264. The
+     * current HEVC path has no equivalent fixed-QP mapping. */
+    if (profile == VAProfileH264ConstrainedBaseline ||
+        profile == VAProfileH264Main || profile == VAProfileH264High)
+        modes |= VA_RC_CQP;
+    return modes;
+}
+
 VAStatus dmd_GetConfigAttributes(VADriverContextP ctx, VAProfile profile,
                                  VAEntrypoint entrypoint,
                                  VAConfigAttrib *attrib_list, int num_attribs)
@@ -310,7 +321,8 @@ VAStatus dmd_GetConfigAttributes(VADriverContextP ctx, VAProfile profile,
             break;
         case VAConfigAttribRateControl:
             attrib_list[i].value = entrypoint == VAEntrypointEncSlice
-                ? (VA_RC_CBR | VA_RC_VBR) : VA_ATTRIB_NOT_SUPPORTED;
+                ? enc_rate_control_for_profile(profile)
+                : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribEncPackedHeaders:
             /* This backend lets Venus generate sequence and picture headers. */
@@ -481,7 +493,7 @@ VAStatus dmd_QueryConfigAttributes(VADriverContextP ctx, VAConfigID config_id,
             } else if (cfg->attribs[i].type == VAConfigAttribRateControl &&
                        cfg->entrypoint == VAEntrypointEncSlice) {
                 attrib_list[n] = cfg->attribs[i];
-                attrib_list[n].value = VA_RC_CBR | VA_RC_VBR;
+                attrib_list[n].value = enc_rate_control_for_profile(cfg->profile);
                 have_rc = 1;
             } else if (cfg->attribs[i].type == VAConfigAttribEncPackedHeaders &&
                        cfg->entrypoint == VAEntrypointEncSlice) {
@@ -507,7 +519,7 @@ VAStatus dmd_QueryConfigAttributes(VADriverContextP ctx, VAConfigID config_id,
         if (cfg->entrypoint == VAEntrypointEncSlice) {
             if (!have_rc && n < DMD_MAX_CONFIG_ATTRIBUTES) {
                 attrib_list[n].type = VAConfigAttribRateControl;
-                attrib_list[n++].value = VA_RC_CBR | VA_RC_VBR;
+                attrib_list[n++].value = enc_rate_control_for_profile(cfg->profile);
             }
             if (!have_packed && n < DMD_MAX_CONFIG_ATTRIBUTES) {
                 attrib_list[n].type = VAConfigAttribEncPackedHeaders;

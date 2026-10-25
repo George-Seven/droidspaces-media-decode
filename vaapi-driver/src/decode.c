@@ -987,6 +987,7 @@ VAStatus dmd_CreateContext(VADriverContextP ctx, VAConfigID config_id,
     c->picture_width = (unsigned int)picture_width;
     c->picture_height = (unsigned int)picture_height;
     c->enc_rate_control = enc_rate_control;
+    c->enc_qp = 26;
     c->flag = flag;
     c->current_target = VA_INVALID_ID;
 

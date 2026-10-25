@@ -143,6 +143,20 @@ VAStatus dmd_encode_render(VADriverContextP ctx, VAContextID context,
                 c->have_enc_pic = 1;
             }
         }
+        if (b->type == VAEncMiscParameterBufferType &&
+            b->size >= sizeof(VAEncMiscParameterBuffer) +
+                       sizeof(VAEncMiscParameterRateControl)) {
+            const VAEncMiscParameterBuffer *misc = b->data;
+            if (misc->type == VAEncMiscParameterTypeRateControl) {
+                const VAEncMiscParameterRateControl *rc =
+                    (const VAEncMiscParameterRateControl *)misc->data;
+                unsigned qp = rc->initial_qp ? rc->initial_qp
+                            : rc->quality_factor ? rc->quality_factor
+                            : rc->ICQ_quality_factor;
+                if (qp >= 1 && qp <= 51)
+                    c->enc_qp = qp;
+            }
+        }
     }
     pthread_mutex_unlock(&drv->lock);
     return status;
@@ -183,6 +197,7 @@ VAStatus dmd_encode_end(VADriverContextP ctx, VAContextID context)
     unsigned visible_width = c->picture_width;
     unsigned visible_height = c->picture_height;
     uint32_t rate_control = c->enc_rate_control;
+    unsigned int qp = c->enc_qp;
     int force_key = 0;
     if (c->codec == DMD_CODEC_H264) {
         bitrate = c->enc_h264_seq.bits_per_second;
@@ -224,7 +239,7 @@ VAStatus dmd_encode_end(VADriverContextP ctx, VAContextID context)
         enc = dmd_v4l2_enc_open(c->codec, c->profile,
                                 c->picture_width, c->picture_height,
                                 visible_width, visible_height,
-                                bitrate, gop, rate_control);
+                                bitrate, gop, rate_control, qp);
         pthread_mutex_lock(&drv->lock);
         c = dmd_find_context_locked(drv, context);
         if (c && enc) c->encoder = enc;

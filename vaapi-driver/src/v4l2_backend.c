@@ -1520,7 +1520,8 @@ struct dmd_v4l2_enc *dmd_v4l2_enc_open(int codec, VAProfile profile,
                                         unsigned int visible_height,
                                         unsigned int bitrate,
                                         unsigned int gop,
-                                        uint32_t rate_control)
+                                        uint32_t rate_control,
+                                        unsigned int qp)
 {
     uint32_t compressed = enc_fourcc(codec);
     if (!compressed || !dmd_v4l2_enc_probe(codec)) return NULL;
@@ -1611,9 +1612,16 @@ struct dmd_v4l2_enc *dmd_v4l2_enc_open(int codec, VAProfile profile,
     enc_set_ctrl(e->fd, V4L2_CID_MPEG_VIDEO_B_FRAMES, 0, "video_b_frames");
     enc_set_ctrl(e->fd, V4L2_CID_MPEG_VIDEO_GOP_SIZE,
                  gop ? (int)gop : 60, "video_gop_size");
+    /* msm_vidc exposes only VBR/CBR in its bitrate-mode menu. VAAPI clients
+     * commonly select CQP when no bitrate was requested; emulate that mode
+     * with VBR plus fixed H.264 QP controls instead of requesting the
+     * unsupported V4L2 CQ menu item. */
+    int cqp = (rate_control & VA_RC_CQP) != 0;
+    if (qp < 1 || qp > 51) qp = 26;
     enc_set_ctrl(e->fd, V4L2_CID_MPEG_VIDEO_BITRATE_MODE,
-                 (rate_control & VA_RC_CBR) ? V4L2_MPEG_VIDEO_BITRATE_MODE_CBR
-                                             : V4L2_MPEG_VIDEO_BITRATE_MODE_VBR,
+                 (rate_control & VA_RC_CBR) && !cqp
+                     ? V4L2_MPEG_VIDEO_BITRATE_MODE_CBR
+                     : V4L2_MPEG_VIDEO_BITRATE_MODE_VBR,
                  "video_bitrate_mode");
     enc_set_ctrl(e->fd, V4L2_CID_MPEG_VIDEO_BITRATE,
                  bitrate ? (int)bitrate : 2000000, "video_bitrate");
@@ -1626,6 +1634,23 @@ struct dmd_v4l2_enc *dmd_v4l2_enc_open(int codec, VAProfile profile,
                            profile == VAProfileH264Main ? 2 : 4;
         enc_set_ctrl(e->fd, 0x00990a6b, h264_profile, "h264_profile");
         enc_set_ctrl(e->fd, 0x00990a67, 14, "h264_level");
+        if (cqp) {
+            /* VAAPI's default CQP request carries no bitrate. Give firmware
+             * a valid VBR ceiling and pin all H.264 frame QPs to a moderate
+             * quality value. The V4L2 node has no CQ bitrate-mode entry. */
+            enc_set_ctrl(e->fd, V4L2_CID_MPEG_VIDEO_BITRATE,
+                         2000000, "video_bitrate(CQP fallback)");
+            enc_set_ctrl(e->fd, V4L2_CID_MPEG_VIDEO_BITRATE_PEAK,
+                         2000000, "video_peak_bitrate(CQP fallback)");
+            enc_set_ctrl(e->fd, V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP,
+                         (int)qp, "h264_i_frame_qp_value");
+            enc_set_ctrl(e->fd, V4L2_CID_MPEG_VIDEO_H264_P_FRAME_QP,
+                         (int)qp, "h264_p_frame_qp_value");
+            enc_set_ctrl(e->fd, V4L2_CID_MPEG_VIDEO_H264_MIN_QP,
+                         (int)qp, "h264_minimum_qp_value");
+            enc_set_ctrl(e->fd, V4L2_CID_MPEG_VIDEO_H264_MAX_QP,
+                         (int)qp, "h264_maximum_qp_value");
+        }
     }
 
     e->n_out = enc_reqbufs(e, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,

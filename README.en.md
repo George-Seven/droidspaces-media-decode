@@ -35,6 +35,10 @@ LIBVA_DRIVER_NAME=msm_drm ffmpeg \
   -c:v h264_vaapi -b:v 2M -an out.mp4
 ```
 
+The encoder also accepts FFmpeg's default no-bitrate `h264_vaapi` mode. VAAPI
+CQP is mapped to msm_vidc's VBR mode with the QP requested by VAAPI (26 if the
+client supplies none), since this device exposes only CBR/VBR in its V4L2 menu.
+
 > ⚠️ **0.4.0 is an architectural rewrite.** 0.3.x used
 > `container → unix socket → Android-side decode-daemon → MediaCodec`,
 > which required flashing a KSU module and keeping a daemon resident.
