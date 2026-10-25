@@ -230,6 +230,12 @@ static VAStatus dmd_driver_init(VADriverContextP ctx)
     ctx->str_vendor = DMD_VENDOR_STRING;
 
     dmd_init_vtable(ctx->vtable);
+    if (ctx->vtable_vpp) {
+        ctx->vtable_vpp->vaQueryVideoProcFilters = dmd_vpp_query_filters;
+        ctx->vtable_vpp->vaQueryVideoProcFilterCaps = dmd_vpp_query_filter_caps;
+        ctx->vtable_vpp->vaQueryVideoProcPipelineCaps =
+            dmd_vpp_query_pipeline_caps;
+    }
 
     /* display_type 在 VADriverContext 里是 unsigned long，用 %lx。 */
     dmd_log("init: display_type=0x%lx drm_fd=%d va=%d.%d vendor=%s\n",

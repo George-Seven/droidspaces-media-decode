@@ -5,7 +5,6 @@
 #include "driver.h"
 
 #define DMD_ENC_FRAME_INTERVAL_US 33333ULL
-
 static int dmd_encode_store_output_locked(struct dmd_driver *drv,
                                           struct dmd_context *c,
                                           uint64_t pts_us,
@@ -16,9 +15,9 @@ static int dmd_encode_store_output_locked(struct dmd_driver *drv,
         if (!pending->in_use || pending->pts_us != pts_us) continue;
         struct dmd_buffer *coded = dmd_find_buffer_locked(drv,
                                                            pending->coded_id);
-        if (!coded || coded->type != VAEncCodedBufferType ||
-            size > coded->size)
+        if (!coded || coded->type != VAEncCodedBufferType)
             return -1;
+        if (size > coded->size) return -1;
         memcpy(coded->data, data, size);
         coded->coded_segment.size = (uint32_t)size;
         coded->coded_segment.bit_offset = 0;

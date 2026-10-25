@@ -17,6 +17,8 @@
 #include <va/va_dec_vp9.h>
 #include <va/va_enc_h264.h>
 #include <va/va_enc_hevc.h>
+#include <va/va_vpp.h>
+#include <va/va_backend_vpp.h>
 /* struct drm_state 定义在这里，va_backend.h 只做前向声明。 */
 #include <va/va_drmcommon.h>
 
@@ -82,6 +84,7 @@
 #define DMD_MAX_IMAGE_FORMATS 4
 #define DMD_MAX_SUBPIC_FORMATS 4
 #define DMD_MAX_DISPLAY_ATTRIBUTES 4
+#define DMD_CODEC_VPP 6
 
 /* 同时存活的 config 对象上限。VA-API 的 config 极轻量，
  * 消费者通常只建 1-2 个；给足余量即可。 */
@@ -314,6 +317,13 @@ struct dmd_context {
     uint64_t encode_frame_count;
     int encode_drained;
     struct dmd_encode_pending encode_pending[DMD_MAX_SURFACES];
+
+    VASurfaceID vpp_source;
+    VARectangle vpp_source_region;
+    VARectangle vpp_output_region;
+    int vpp_has_source_region;
+    int vpp_has_output_region;
+    int vpp_have_params;
 
     /* V4L2 解码会话。惰性创建：CreateContext 时建，失败则留 NULL 由
      * EndPicture 重试 —— 建 context 时 daemon 不可用不该让整个初始化失败。 */
@@ -804,6 +814,20 @@ VAStatus dmd_ExportSurfaceHandle(VADriverContextP ctx, VASurfaceID surface_id,
  * 的 surface 直接报成功放行，真正的等待推迟到取像素时。所以 image.c 的
  * DeriveImage / GetImage 在读 surface 几何或拷像素之前必须先调用本函数。 */
 VAStatus dmd_surface_wait(struct dmd_driver *drv, VASurfaceID surface);
+VAStatus dmd_vpp_end(VADriverContextP ctx, VAContextID context);
+VAStatus dmd_vpp_render(VADriverContextP ctx, VAContextID context,
+                        VABufferID *buffers, int num_buffers);
+VAStatus dmd_vpp_query_filters(VADriverContextP ctx, VAContextID context,
+                               VAProcFilterType *filters,
+                               unsigned int *num_filters);
+VAStatus dmd_vpp_query_filter_caps(VADriverContextP ctx, VAContextID context,
+                                   VAProcFilterType type, void *filter_caps,
+                                   unsigned int *num_filter_caps);
+VAStatus dmd_vpp_query_pipeline_caps(VADriverContextP ctx,
+                                     VAContextID context,
+                                     VABufferID *filters,
+                                     unsigned int num_filters,
+                                     VAProcPipelineCaps *pipeline_caps);
 
 VAStatus dmd_QuerySurfaceStatus(VADriverContextP ctx,
                                 VASurfaceID render_target,

@@ -945,12 +945,14 @@ VAStatus dmd_CreateContext(VADriverContextP ctx, VAConfigID config_id,
     }
     profile = cfg->profile;
     entrypoint = cfg->entrypoint;
+    int vpp = entrypoint == VAEntrypointVideoProc &&
+              profile == VAProfileNone;
     if (entrypoint == VAEntrypointEncSlice) {
         for (int i = 0; i < cfg->num_attribs; i++)
             if (cfg->attribs[i].type == VAConfigAttribRateControl)
                 enc_rate_control = cfg->attribs[i].value;
     }
-    codec = dmd_profile_to_codec(profile);
+    codec = vpp ? DMD_CODEC_VPP : dmd_profile_to_codec(profile);
     if (codec < 0) {
         pthread_mutex_unlock(&drv->lock);
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
@@ -999,6 +1001,13 @@ VAStatus dmd_CreateContext(VADriverContextP ctx, VAConfigID config_id,
         dmd_log("CreateContext: deferred encoder config=%u profile=%d %dx%d -> context=%u\n",
                 (unsigned)config_id, (int)profile, picture_width,
                 picture_height, (unsigned)new_id);
+        return VA_STATUS_SUCCESS;
+    }
+
+    if (entrypoint == VAEntrypointVideoProc) {
+        *context = new_id;
+        dmd_log("CreateContext: VPP %dx%d -> context=%u\n",
+                picture_width, picture_height, (unsigned)new_id);
         return VA_STATUS_SUCCESS;
     }
 
@@ -1527,6 +1536,7 @@ VAStatus dmd_BeginPicture(VADriverContextP ctx, VAContextID context,
      * VA-API 的契约是：surface 的复用时机由**调用方**负责，
      * 驱动不该反过来限制。谁复用得太早，就是谁的资源管理问题。 */
     c->current_target = render_target;
+    c->vpp_have_params = 0;
     c->slice_len = 0;
     c->av1_tile_count = 0;   /* tile 边界随帧重置，与 slice_len 同生命周期 */
     c->have_vp8_slice_param = 0;
@@ -1563,6 +1573,10 @@ VAStatus dmd_RenderPicture(VADriverContextP ctx, VAContextID context,
     if (c->entrypoint == VAEntrypointEncSlice) {
         pthread_mutex_unlock(&drv->lock);
         return dmd_encode_render(ctx, context, buffers, num_buffers);
+    }
+    if (c->entrypoint == VAEntrypointVideoProc) {
+        pthread_mutex_unlock(&drv->lock);
+        return dmd_vpp_render(ctx, context, buffers, num_buffers);
     }
     if (c->current_target == VA_INVALID_ID) {
         pthread_mutex_unlock(&drv->lock);
@@ -2661,6 +2675,10 @@ VAStatus dmd_EndPicture(VADriverContextP ctx, VAContextID context)
     if (c->entrypoint == VAEntrypointEncSlice) {
         pthread_mutex_unlock(&drv->lock);
         return dmd_encode_end(ctx, context);
+    }
+    if (c->entrypoint == VAEntrypointVideoProc) {
+        pthread_mutex_unlock(&drv->lock);
+        return dmd_vpp_end(ctx, context);
     }
     if (c->current_target == VA_INVALID_ID) {
         pthread_mutex_unlock(&drv->lock);

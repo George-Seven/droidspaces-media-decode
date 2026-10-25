@@ -243,6 +243,12 @@ VAStatus dmd_QueryConfigEntrypoints(VADriverContextP ctx, VAProfile profile,
     if (!ctx || !entrypoint_list || !num_entrypoints)
         return VA_STATUS_ERROR_INVALID_PARAMETER;
 
+    if (profile == VAProfileNone) {
+        entrypoint_list[0] = VAEntrypointVideoProc;
+        *num_entrypoints = 1;
+        return VA_STATUS_SUCCESS;
+    }
+
     if (!dmd_profile_supported(profile)) {
         *num_entrypoints = 0;
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
@@ -300,9 +306,13 @@ VAStatus dmd_GetConfigAttributes(VADriverContextP ctx, VAProfile profile,
     if (num_attribs < 0)
         return VA_STATUS_ERROR_INVALID_PARAMETER;
 
-    if (!dmd_profile_supported(profile))
+    const int vpp = profile == VAProfileNone &&
+                    entrypoint == VAEntrypointVideoProc;
+    if (!vpp && !dmd_profile_supported(profile))
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
-    if (entrypoint == VAEntrypointEncSlice) {
+    if (vpp) {
+        /* CPU NV12 scaler implemented by the driver's VPP path. */
+    } else if (entrypoint == VAEntrypointEncSlice) {
         int codec = dmd_profile_to_codec(profile);
         if ((codec != DMD_CODEC_H264 && codec != DMD_CODEC_HEVC) ||
             !dmd_v4l2_enc_probe(codec))
@@ -319,15 +329,21 @@ VAStatus dmd_GetConfigAttributes(VADriverContextP ctx, VAProfile profile,
             /* 8-bit 4:2:0 NV12；AV1 再加一个 10-bit P010。 */
             attrib_list[i].value = rt_formats_for_profile(profile);
             break;
+        case VAConfigAttribMaxPictureWidth:
+            attrib_list[i].value = DMD_MAX_WIDTH;
+            break;
+        case VAConfigAttribMaxPictureHeight:
+            attrib_list[i].value = DMD_MAX_HEIGHT;
+            break;
         case VAConfigAttribRateControl:
             attrib_list[i].value = entrypoint == VAEntrypointEncSlice
                 ? enc_rate_control_for_profile(profile)
                 : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribEncPackedHeaders:
-            /* This backend lets Venus generate sequence and picture headers. */
             attrib_list[i].value = entrypoint == VAEntrypointEncSlice
-                ? 0 : VA_ATTRIB_NOT_SUPPORTED;
+                ? 0
+                : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribEncMaxRefFrames:
             /* The V4L2 backend currently runs low-delay P encoding: one
@@ -336,12 +352,6 @@ VAStatus dmd_GetConfigAttributes(VADriverContextP ctx, VAProfile profile,
              * 16 bits. */
             attrib_list[i].value = entrypoint == VAEntrypointEncSlice
                 ? 1 : VA_ATTRIB_NOT_SUPPORTED;
-            break;
-        case VAConfigAttribMaxPictureWidth:
-            attrib_list[i].value = DMD_MAX_WIDTH;
-            break;
-        case VAConfigAttribMaxPictureHeight:
-            attrib_list[i].value = DMD_MAX_HEIGHT;
             break;
         case VAConfigAttribDecSliceMode:
             /* daemon 接收的是完整 Annex B 数据单元，对应 normal slice 模式。 */
@@ -370,9 +380,13 @@ VAStatus dmd_CreateConfig(VADriverContextP ctx, VAProfile profile,
     if (num_attribs > DMD_MAX_CONFIG_ATTRIBUTES)
         return VA_STATUS_ERROR_INVALID_PARAMETER;
 
-    if (!dmd_profile_supported(profile))
+    const int vpp = profile == VAProfileNone &&
+                    entrypoint == VAEntrypointVideoProc;
+    if (!vpp && !dmd_profile_supported(profile))
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
-    if (entrypoint == VAEntrypointEncSlice) {
+    if (vpp) {
+        /* VAProfileNone is the standard profile for video processing. */
+    } else if (entrypoint == VAEntrypointEncSlice) {
         int codec = dmd_profile_to_codec(profile);
         if ((codec != DMD_CODEC_H264 && codec != DMD_CODEC_HEVC) ||
             !dmd_v4l2_enc_probe(codec))
