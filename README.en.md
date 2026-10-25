@@ -2,8 +2,8 @@
 
 > 🌐 **中文版本：[README.md](README.md)**
 
-Hardware video decoding for Linux containers: a VA-API driver that talks directly
-to Qualcomm's msm_vidc V4L2 interface.
+Hardware video decoding and encoding for Linux containers: a VA-API driver that
+talks directly to Qualcomm's msm_vidc V4L2 interfaces.
 
 ## Overview
 
@@ -20,6 +20,20 @@ libva → dlopen → msm_drm_drv_video.so     ← this project
 ```
 
 **Nothing from this project runs on the Android side.**
+
+The current decode path uses `/dev/video32`. VA-API H.264 and HEVC encoding
+targets `/dev/video33` with linear NV12 input. Encoding has been verified on
+device. The encoder needs one frame of pipeline lookahead; the driver handles
+that through standard VA coded-buffer synchronization, so FFmpeg's normal
+default async depth is sufficient:
+
+```sh
+LIBVA_DRIVER_NAME=msm_drm ffmpeg \
+  -init_hw_device vaapi=va:/dev/dri/renderD128 \
+  -hwaccel vaapi -hwaccel_device va -hwaccel_output_format vaapi \
+  -i in.mp4 -vf 'scale_vaapi=format=nv12' \
+  -c:v h264_vaapi -b:v 2M -an out.mp4
+```
 
 > ⚠️ **0.4.0 is an architectural rewrite.** 0.3.x used
 > `container → unix socket → Android-side decode-daemon → MediaCodec`,

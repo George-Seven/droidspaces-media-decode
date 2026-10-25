@@ -22,10 +22,13 @@
 #endif
 
 #include "v4l2_backend.h"
+#include "driver.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/videodev2.h>
+#include <linux/dma-buf.h>
+#include <drm/drm.h>
 #include <poll.h>
 #include <stdio.h>
 #include <string.h>
@@ -532,12 +535,20 @@ int dmd_v4l2_open(struct dmd_v4l2_dec *d, int codec_id, int w, int h)
          * 用可察觉但极少的顺序抖动换回可用的播放，这是当前硬件下的最优解：
          * 显示序滞后 7 > Firefox 在飞 5，互等无法靠软件消除（LOWLATENCY
          * 开关对显示序滞后无影响，slowfeed 实测两种设置都是 7）。 */
-        { 0x00992003, 1,  "OUTPUT_ORDER"    },  /* base+3，1=解码序 */
+        { 0x00992003, 1,  "LOWLATENCY_MODE" },  /* base+3：本平台是 lowlatency_mode（关批处理）；
+                                                 * ⚠️ 不是旧平台的 OUTPUT_ORDER，别再按旧偏移理解 */
         { 0x00992011, 2,  "EXTRADATA"       },  /* base+17，MENU，HAL 连设四种 */
         { 0x00992011, 25, "EXTRADATA"       },
         { 0x00992011, 31, "EXTRADATA"       },
         { 0x00992011, 29, "EXTRADATA"       },
-        { 0x00992038, 1,  "LOWLATENCY_MODE" },  /* base+56 */
+        /* sun（SM8750）上解码序出帧必须走标准 display_delay 控制：
+         *   msm_vidc_sun.c: DISPLAY_DELAY_ENABLE / DISPLAY_DELAY → OUTPUT_ORDER
+         *   msm_vidc_adjust_output_order(): enable && !delay → OUTPUT_ORDER=1
+         * OUTPUT_ORDER=1 即 HFI_PROP_DECODE_ORDER_OUTPUT=1，固件首帧滞后
+         * 7 → 4。旧平台的私有偏移（0x00992003=OUTPUT_ORDER）在此设备上
+         * 其实是 lowlatency_mode，照搬会漏掉这一步。 */
+        { 0x00990b8e, 1,  "DISPLAY_DELAY_ENABLE" }, /* V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE */
+        { 0x00990b8d, 0,  "DISPLAY_DELAY"        }, /* V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY */
     };
     for (unsigned i = 0; i < sizeof(inits) / sizeof(inits[0]); i++) {
         memset(&ctl, 0, sizeof(ctl));
@@ -1103,15 +1114,19 @@ static int try_dq_capture(struct dmd_v4l2_dec *d, uint8_t **out_data,
 
     /* bytesused==0 且带 LAST 标记 = 流结束标记帧，不是画面。 */
     if (p[0].bytesused == 0) {
-        if (v.flags & V4L2_BUF_FLAG_LAST) {
-            d->saw_eos = 1;
-            return 2;
-        }
-        /* 空帧但非 LAST：还回去继续等。 */
+        /* 空帧一律归还：LAST 标记帧不是画面，但缓冲必须回到 CAPTURE 队列。
+         * 不归还的话每次软排空都漏掉一个 CAPTURE 缓冲，十几次后固件
+         * 无缓冲可写，后续排空再也收不到 LAST（实测：约 15 次后 START
+         * 返回 EBUSY、会话只能重建）。 */
         qbuf_userptr(d->fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
                      (int)v.index, &d->cap[v.index], 0, 0,
                      d->cap_planes > 1 ? d->extra[v.index].dbuf_fd : -1,
                      (unsigned)d->extra_size, d->buf_mem);
+        if (v.flags & V4L2_BUF_FLAG_LAST) {
+            d->saw_eos = 1;
+            return 2;
+        }
+        /* 空帧但非 LAST：已归还，继续等。 */
         return 0;
     }
 
@@ -1360,4 +1375,519 @@ void dmd_v4l2_close(struct dmd_v4l2_dec *d)
 
     d->cap_ready = 0;
     d->n_out = d->n_cap = 0;
+}
+
+/* =============================== V4L2 encoder ===============================
+ *
+ * Qualcomm exposes encoding on a distinct msm_vidc node. The queue directions
+ * are the inverse of decode: raw NV12 enters OUTPUT_MPLANE, compressed H.264
+ * or HEVC leaves CAPTURE_MPLANE. As on the decoder node, buffers are dma-bufs
+ * even on kernels that label the queue USERPTR (the fd then lives in
+ * plane.reserved[0]). */
+
+#define ENC_NODE_PRIMARY "/dev/video33"
+#define ENC_CAPTURE_BUFS 4 /* node reports min_number_of_capture_buffers=4 */
+
+static uint32_t enc_fourcc(int codec)
+{
+    if (codec == DMD_V4L2_CODEC_H264) return V4L2_PIX_FMT_H264;
+    if (codec == DMD_V4L2_CODEC_HEVC) return V4L2_PIX_FMT_HEVC;
+    return 0;
+}
+
+static int enc_has_format(int fd, enum v4l2_buf_type type, uint32_t fourcc)
+{
+    for (unsigned i = 0; i < 64; i++) {
+        struct v4l2_fmtdesc f;
+        memset(&f, 0, sizeof(f));
+        f.index = i;
+        f.type = type;
+        if (ioctl(fd, VIDIOC_ENUM_FMT, &f) < 0) break;
+        if (f.pixelformat == fourcc) return 1;
+    }
+    return 0;
+}
+
+int dmd_v4l2_enc_probe(int codec)
+{
+    uint32_t compressed = enc_fourcc(codec);
+    if (!compressed) return 0;
+    int fd = open(ENC_NODE_PRIMARY, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return 0;
+    struct v4l2_capability cap;
+    memset(&cap, 0, sizeof(cap));
+    int ok = ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0 &&
+        (cap.device_caps & V4L2_CAP_VIDEO_M2M_MPLANE) &&
+        enc_has_format(fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+                       V4L2_PIX_FMT_NV12) &&
+        enc_has_format(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, compressed);
+    if (ok) {
+        struct v4l2_format f;
+        memset(&f, 0, sizeof(f));
+        f.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+        f.fmt.pix_mp.width = 320;
+        f.fmt.pix_mp.height = 240;
+        f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12;
+        f.fmt.pix_mp.field = V4L2_FIELD_NONE;
+        f.fmt.pix_mp.num_planes = 1;
+        ok = ioctl(fd, VIDIOC_TRY_FMT, &f) == 0 &&
+             f.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV12;
+        memset(&f, 0, sizeof(f));
+        f.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        f.fmt.pix_mp.width = 320;
+        f.fmt.pix_mp.height = 240;
+        f.fmt.pix_mp.pixelformat = compressed;
+        f.fmt.pix_mp.field = V4L2_FIELD_NONE;
+        f.fmt.pix_mp.num_planes = 1;
+        ok = ok && ioctl(fd, VIDIOC_TRY_FMT, &f) == 0 &&
+             f.fmt.pix_mp.pixelformat == compressed;
+    }
+    close(fd);
+    return ok;
+}
+
+static void enc_set_ctrl(int fd, uint32_t id, int value, const char *name)
+{
+    struct v4l2_control c;
+    memset(&c, 0, sizeof(c));
+    c.id = id;
+    c.value = value;
+    if (ioctl(fd, VIDIOC_S_CTRL, &c) < 0)
+        V4L2_LOG("encoder S_CTRL %s(0x%x)=%d failed: %s", name, id,
+                 value, strerror(errno));
+}
+
+void dmd_v4l2_enc_set_controls(struct dmd_v4l2_enc *e,
+                               unsigned int bitrate, unsigned int gop)
+{
+    if (!e || e->fd < 0) return;
+    if (bitrate) {
+        enc_set_ctrl(e->fd, V4L2_CID_MPEG_VIDEO_BITRATE,
+                     (int)bitrate, "video_bitrate");
+        enc_set_ctrl(e->fd, V4L2_CID_MPEG_VIDEO_BITRATE_PEAK,
+                     (int)bitrate, "video_peak_bitrate");
+    }
+    if (gop)
+        enc_set_ctrl(e->fd, V4L2_CID_MPEG_VIDEO_GOP_SIZE,
+                     (int)gop, "video_gop_size");
+}
+
+static int enc_reqbufs(struct dmd_v4l2_enc *e, enum v4l2_buf_type type,
+                       int count, enum v4l2_memory mem)
+{
+    struct v4l2_requestbuffers rb;
+    memset(&rb, 0, sizeof(rb));
+    rb.type = type;
+    rb.memory = mem;
+    rb.count = (unsigned)count;
+    if (xioctl(e->fd, VIDIOC_REQBUFS, &rb, "encoder REQBUFS") < 0)
+        return -1;
+    return (int)rb.count;
+}
+
+static int enc_qbuf(struct dmd_v4l2_enc *e, enum v4l2_buf_type type,
+                    int index, struct dmd_v4l2_buf *b, unsigned bytesused,
+                    uint64_t pts)
+{
+    struct v4l2_buffer v;
+    struct v4l2_plane p[VIDEO_MAX_PLANES];
+    memset(&v, 0, sizeof(v));
+    memset(p, 0, sizeof(p));
+    v.type = type;
+    v.memory = (enum v4l2_memory)e->buf_mem;
+    v.index = (unsigned)index;
+    v.length = 1;
+    v.m.planes = p;
+    if (e->buf_mem == V4L2_MEMORY_DMABUF)
+        p[0].m.fd = b->dbuf_fd;
+    else
+        p[0].reserved[0] = (unsigned)b->dbuf_fd;
+    p[0].length = (unsigned)b->length;
+    p[0].bytesused = bytesused;
+    if (pts) {
+        v.timestamp.tv_sec = (long)(pts / 1000000ULL);
+        v.timestamp.tv_usec = (long)(pts % 1000000ULL);
+    }
+    if (xioctl(e->fd, VIDIOC_QBUF, &v, "encoder QBUF") < 0) return -1;
+    b->queued = 1;
+    return 0;
+}
+
+struct dmd_v4l2_enc *dmd_v4l2_enc_open(int codec, VAProfile profile,
+                                        unsigned int width,
+                                        unsigned int height,
+                                        unsigned int visible_width,
+                                        unsigned int visible_height,
+                                        unsigned int bitrate,
+                                        unsigned int gop,
+                                        uint32_t rate_control)
+{
+    uint32_t compressed = enc_fourcc(codec);
+    if (!compressed || !dmd_v4l2_enc_probe(codec)) return NULL;
+
+    struct dmd_v4l2_enc *e = calloc(1, sizeof(*e));
+    if (!e) return NULL;
+    e->fd = -1;
+    e->codec = codec;
+    e->width = (int)width;
+    e->height = (int)height;
+    e->out_fourcc = V4L2_PIX_FMT_NV12;
+    e->cap_fourcc = compressed;
+    e->alloc.fd = -1;
+    e->alloc.heap_fd = -1;
+    for (int i = 0; i < DMD_V4L2_MAX_OUT; i++) e->alloc.out[i].dbuf_fd = -1;
+    for (int i = 0; i < DMD_V4L2_MAX_CAP; i++) {
+        e->alloc.cap[i].dbuf_fd = -1;
+        e->alloc.extra[i].dbuf_fd = -1;
+    }
+
+    e->fd = open(ENC_NODE_PRIMARY, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (e->fd < 0) goto fail;
+
+    struct v4l2_format f;
+    memset(&f, 0, sizeof(f));
+    f.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+    f.fmt.pix_mp.width = width;
+    f.fmt.pix_mp.height = height;
+    f.fmt.pix_mp.pixelformat = e->out_fourcc;
+    f.fmt.pix_mp.field = V4L2_FIELD_NONE;
+    f.fmt.pix_mp.num_planes = 1;
+    if (xioctl(e->fd, VIDIOC_S_FMT, &f, "encoder S_FMT(OUTPUT)") < 0 ||
+        f.fmt.pix_mp.pixelformat != e->out_fourcc)
+        goto fail;
+    e->width = (int)f.fmt.pix_mp.width;
+    e->height = (int)f.fmt.pix_mp.height;
+    /* msm_vidc advertises a raw NV12 sizeimage larger than the visible
+     * surface allocation (for example 163840 vs 110592 at 320x192). QBUF
+     * validates the dma-buf length against that negotiated sizeimage. */
+    unsigned frame_size = (unsigned)(((e->width + 127) & ~127) *
+                                     ((e->height + 31) & ~31) * 3u / 2u);
+    e->input_size = f.fmt.pix_mp.plane_fmt[0].sizeimage;
+    if (e->input_size < frame_size) e->input_size = frame_size;
+
+    /* VAAPI surfaces use macroblock-aligned dimensions. Apply the display
+     * crop before configuring the compressed side so msm_vidc writes a
+     * conforming SPS (for example 320x180 inside a 320x192 surface). */
+    if (visible_width && visible_height &&
+        (visible_width != width || visible_height != height)) {
+        struct v4l2_selection sel;
+        memset(&sel, 0, sizeof(sel));
+        sel.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+        sel.target = V4L2_SEL_TGT_CROP;
+        sel.r.left = 0;
+        sel.r.top = 0;
+        sel.r.width = visible_width;
+        sel.r.height = visible_height;
+        if (xioctl(e->fd, VIDIOC_S_SELECTION, &sel,
+                   "encoder S_SELECTION(OUTPUT crop)") < 0 ||
+            sel.r.width != visible_width || sel.r.height != visible_height)
+            goto fail;
+    }
+
+    memset(&f, 0, sizeof(f));
+    f.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    f.fmt.pix_mp.width = visible_width ? visible_width : (unsigned)e->width;
+    f.fmt.pix_mp.height = visible_height ? visible_height : (unsigned)e->height;
+    f.fmt.pix_mp.pixelformat = e->cap_fourcc;
+    f.fmt.pix_mp.field = V4L2_FIELD_NONE;
+    f.fmt.pix_mp.num_planes = 1;
+    if (xioctl(e->fd, VIDIOC_S_FMT, &f, "encoder S_FMT(CAPTURE)") < 0 ||
+        f.fmt.pix_mp.pixelformat != e->cap_fourcc)
+        goto fail;
+    e->output_size = f.fmt.pix_mp.plane_fmt[0].sizeimage;
+    if (e->output_size < (unsigned)e->width * (unsigned)e->height * 2u)
+        e->output_size = (unsigned)e->width * (unsigned)e->height * 2u;
+
+    struct v4l2_streamparm sp;
+    memset(&sp, 0, sizeof(sp));
+    sp.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+    sp.parm.output.timeperframe.numerator = 1;
+    sp.parm.output.timeperframe.denominator = 30;
+    ioctl(e->fd, VIDIOC_S_PARM, &sp);
+
+    /* msm_vidc reports these standard controls and the Qualcomm encoder
+     * extensions on this node. Keep B-frame reordering disabled until the VA
+     * coded-buffer-to-surface association path supports delayed output. */
+    enc_set_ctrl(e->fd, V4L2_CID_MPEG_VIDEO_B_FRAMES, 0, "video_b_frames");
+    enc_set_ctrl(e->fd, V4L2_CID_MPEG_VIDEO_GOP_SIZE,
+                 gop ? (int)gop : 60, "video_gop_size");
+    enc_set_ctrl(e->fd, V4L2_CID_MPEG_VIDEO_BITRATE_MODE,
+                 (rate_control & VA_RC_CBR) ? V4L2_MPEG_VIDEO_BITRATE_MODE_CBR
+                                             : V4L2_MPEG_VIDEO_BITRATE_MODE_VBR,
+                 "video_bitrate_mode");
+    enc_set_ctrl(e->fd, V4L2_CID_MPEG_VIDEO_BITRATE,
+                 bitrate ? (int)bitrate : 2000000, "video_bitrate");
+    enc_set_ctrl(e->fd, V4L2_CID_MPEG_VIDEO_BITRATE_PEAK,
+                 bitrate ? (int)bitrate : 2000000, "video_peak_bitrate");
+    enc_set_ctrl(e->fd, 0x009909d8, 1, "sequence_header_mode");
+    enc_set_ctrl(e->fd, 0x00992003, 1, "lowlatency_mode");
+    if (codec == DMD_V4L2_CODEC_H264) {
+        int h264_profile = profile == VAProfileH264ConstrainedBaseline ? 1 :
+                           profile == VAProfileH264Main ? 2 : 4;
+        enc_set_ctrl(e->fd, 0x00990a6b, h264_profile, "h264_profile");
+        enc_set_ctrl(e->fd, 0x00990a67, 14, "h264_level");
+    }
+
+    e->n_out = enc_reqbufs(e, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+                           DMD_V4L2_MAX_OUT, V4L2_MEMORY_DMABUF);
+    e->n_cap = enc_reqbufs(e, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+                           ENC_CAPTURE_BUFS, V4L2_MEMORY_DMABUF);
+    if (e->n_out <= 0 || e->n_cap <= 0) {
+        struct v4l2_requestbuffers rb;
+        memset(&rb, 0, sizeof(rb));
+        rb.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+        rb.memory = V4L2_MEMORY_DMABUF;
+        ioctl(e->fd, VIDIOC_REQBUFS, &rb);
+        memset(&rb, 0, sizeof(rb));
+        rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        rb.memory = V4L2_MEMORY_DMABUF;
+        ioctl(e->fd, VIDIOC_REQBUFS, &rb);
+        e->n_out = enc_reqbufs(e, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+                               DMD_V4L2_MAX_OUT, V4L2_MEMORY_USERPTR);
+        e->n_cap = enc_reqbufs(e, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+                               ENC_CAPTURE_BUFS, V4L2_MEMORY_USERPTR);
+        if (e->n_out <= 0 || e->n_cap <= 0) goto fail;
+        e->buf_mem = V4L2_MEMORY_USERPTR;
+    } else {
+        e->buf_mem = V4L2_MEMORY_DMABUF;
+    }
+    if (e->n_out > DMD_V4L2_MAX_OUT) e->n_out = DMD_V4L2_MAX_OUT;
+    if (e->n_cap > DMD_V4L2_MAX_CAP) e->n_cap = DMD_V4L2_MAX_CAP;
+    e->alloc.buf_mem = e->buf_mem;
+    if (bufs_alloc(&e->alloc, e->alloc.cap, e->n_cap,
+                   e->output_size, 1) < 0)
+        goto fail;
+    /* msm_vidc requires four allocated CAPTURE buffers but behaves as if its
+     * encoder latency were the number of buffers queued at startup. Keep the
+     * required pool allocated and recycle one CAPTURE buffer synchronously;
+     * queueing the whole pool adds four empty outputs before the first frame. */
+    if (enc_qbuf(e, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, 0,
+                 &e->alloc.cap[0], 0, 0) < 0)
+        goto fail;
+
+    int type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    if (xioctl(e->fd, VIDIOC_STREAMON, &type, "encoder STREAMON(CAPTURE)") < 0)
+        goto fail;
+    e->cap_streaming = 1;
+    type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+    if (xioctl(e->fd, VIDIOC_STREAMON, &type, "encoder STREAMON(OUTPUT)") < 0)
+        goto fail;
+    e->out_streaming = 1;
+
+    V4L2_LOG("encoder ready: codec=%d %dx%d input=%u output=%u buffers=%d/%d mem=%d",
+             codec, e->width, e->height, e->input_size, e->output_size,
+             e->n_out, e->n_cap, e->buf_mem);
+    return e;
+
+fail:
+    V4L2_LOG("encoder open/setup failed codec=%d %ux%u: %s", codec, width,
+             height, strerror(errno));
+    dmd_v4l2_enc_close(e);
+    return NULL;
+}
+
+int dmd_v4l2_enc_frame(struct dmd_v4l2_enc *e, struct dmd_surface *surface,
+                       const void *src, size_t src_size, void *dst,
+                       size_t dst_capacity, size_t *dst_size,
+                       uint64_t *dst_pts_us,
+                       int force_keyframe)
+{
+    if (!e || e->fd < 0 || !surface || !dst || !dst_size ||
+        !dst_pts_us || e->stopped ||
+        surface->format != VA_RT_FORMAT_YUV420 ||
+        surface->width != (unsigned)e->width ||
+        surface->height != (unsigned)e->height)
+        return -1;
+
+    int input_fd = -1;
+    void *temporary_map = NULL;
+    unsigned frame_size = (unsigned)(((e->width + 127) & ~127) *
+                                     ((e->height + 31) & ~31) * 3u / 2u);
+    if (frame_size > surface->data_size || e->input_size < frame_size)
+        return -1;
+    /* Use a dma-heap buffer with the V4L2 negotiated size. DRM dumb buffers
+     * can be shorter than msm_vidc's sizeimage and are rejected at QBUF. */
+    input_fd = dmabuf_alloc(&e->alloc, e->input_size);
+    if (input_fd < 0) return -1;
+    temporary_map = mmap(NULL, e->input_size, PROT_READ | PROT_WRITE,
+                         MAP_SHARED, input_fd, 0);
+    if (temporary_map == MAP_FAILED) {
+        temporary_map = NULL;
+        close(input_fd);
+        return -1;
+    }
+    if (surface->dumb_sync_fd >= 0) {
+        struct dma_buf_sync source_sync = {
+            .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ
+        };
+        ioctl(surface->dumb_sync_fd, DMA_BUF_IOCTL_SYNC, &source_sync);
+    }
+    struct dma_buf_sync sync = { .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE };
+    ioctl(input_fd, DMA_BUF_IOCTL_SYNC, &sync);
+    memset(temporary_map, 0, e->input_size);
+    memcpy(temporary_map, surface->data, frame_size);
+    sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE;
+    ioctl(input_fd, DMA_BUF_IOCTL_SYNC, &sync);
+    if (surface->dumb_sync_fd >= 0) {
+        struct dma_buf_sync source_sync = {
+            .flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ
+        };
+        ioctl(surface->dumb_sync_fd, DMA_BUF_IOCTL_SYNC, &source_sync);
+    }
+
+    if (force_keyframe) {
+        struct v4l2_control c;
+        memset(&c, 0, sizeof(c));
+        c.id = 0x009909e5; /* Qualcomm force_key_frame button */
+        c.value = 1;
+        ioctl(e->fd, VIDIOC_S_CTRL, &c);
+    }
+    struct dmd_v4l2_buf in;
+    memset(&in, 0, sizeof(in));
+    in.dbuf_fd = input_fd;
+    in.length = e->input_size;
+    int rc = enc_qbuf(e, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, 0, &in,
+                      e->input_size, (uint64_t)e->frame_number * 33333ULL);
+    if (temporary_map) munmap(temporary_map, e->input_size);
+    close(input_fd);
+    if (rc < 0) return -1;
+
+    struct pollfd pfd = { .fd = e->fd, .events = POLLIN | POLLERR };
+    int pr;
+    do { pr = poll(&pfd, 1, 5000); } while (pr < 0 && errno == EINTR);
+    if (pr <= 0 || (pfd.revents & POLLERR) || !(pfd.revents & POLLIN)) return -1;
+
+    struct v4l2_buffer v;
+    struct v4l2_plane p[VIDEO_MAX_PLANES];
+    memset(&v, 0, sizeof(v));
+    memset(p, 0, sizeof(p));
+    v.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    v.memory = (enum v4l2_memory)e->buf_mem;
+    v.m.planes = p;
+    v.length = 1;
+    if (xioctl(e->fd, VIDIOC_DQBUF, &v, "encoder DQBUF(CAPTURE)") < 0 ||
+        v.index >= (unsigned)e->n_cap)
+        return -1;
+    struct dmd_v4l2_buf *cap = &e->alloc.cap[v.index];
+    cap->queued = 0;
+    size_t n = p[0].bytesused;
+    if (n > dst_capacity) {
+        enc_qbuf(e, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, (int)v.index,
+                 cap, 0, 0);
+        return -1;
+    }
+    memcpy(dst, cap->map, n);
+    *dst_size = n;
+    *dst_pts_us = (uint64_t)v.timestamp.tv_sec * 1000000ULL +
+                  (uint64_t)v.timestamp.tv_usec;
+    if (enc_qbuf(e, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, (int)v.index,
+                 cap, 0, 0) < 0)
+        return -1;
+
+    memset(&v, 0, sizeof(v));
+    memset(p, 0, sizeof(p));
+    v.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+    v.memory = (enum v4l2_memory)e->buf_mem;
+    v.m.planes = p;
+    v.length = 1;
+    int dqrc = ioctl(e->fd, VIDIOC_DQBUF, &v);
+    if (dqrc < 0 && errno == EAGAIN) {
+        /* Some msm_vidc firmware returns the encoded CAPTURE buffer just
+         * before it releases the corresponding raw OUTPUT buffer. Wait for
+         * the OUTPUT completion instead of treating this brief reordering as
+         * a failed frame. */
+        pfd.events = POLLOUT | POLLERR;
+        do { pr = poll(&pfd, 1, 5000); } while (pr < 0 && errno == EINTR);
+        if (pr <= 0 || (pfd.revents & POLLERR) ||
+            !(pfd.revents & POLLOUT) ||
+            xioctl(e->fd, VIDIOC_DQBUF, &v, "encoder DQBUF(OUTPUT)") < 0)
+            return -1;
+    } else if (dqrc < 0) {
+        V4L2_LOG("encoder DQBUF(OUTPUT) failed: %s", strerror(errno));
+        return -1;
+    }
+    if (v.index >= (unsigned)e->n_out) return -1;
+    e->frame_number++;
+    (void)src;
+    (void)src_size;
+    return 0;
+}
+
+int dmd_v4l2_enc_drain(struct dmd_v4l2_enc *e,
+                       dmd_v4l2_enc_output_fn output, void *opaque,
+                       unsigned int expected_outputs)
+{
+    if (!e || e->fd < 0 || !output || e->stopped) return -1;
+
+    struct v4l2_encoder_cmd cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.cmd = V4L2_ENC_CMD_STOP;
+    if (xioctl(e->fd, VIDIOC_ENCODER_CMD, &cmd, "encoder CMD_STOP") < 0)
+        return -1;
+    e->stopped = 1;
+
+    unsigned int received = 0;
+    while (received < expected_outputs) {
+        struct pollfd pfd = { .fd = e->fd, .events = POLLIN | POLLERR };
+        int pr;
+        do { pr = poll(&pfd, 1, 5000); } while (pr < 0 && errno == EINTR);
+        if (pr <= 0 || (pfd.revents & POLLERR) || !(pfd.revents & POLLIN))
+            return -1;
+
+        struct v4l2_buffer v;
+        struct v4l2_plane p[VIDEO_MAX_PLANES];
+        memset(&v, 0, sizeof(v));
+        memset(p, 0, sizeof(p));
+        v.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        v.memory = (enum v4l2_memory)e->buf_mem;
+        v.m.planes = p;
+        v.length = 1;
+        if (xioctl(e->fd, VIDIOC_DQBUF, &v,
+                   "encoder DQBUF(CAPTURE drain)") < 0 ||
+            v.index >= (unsigned)e->n_cap)
+            return -1;
+
+        struct dmd_v4l2_buf *cap = &e->alloc.cap[v.index];
+        cap->queued = 0;
+        size_t n = p[0].bytesused;
+        uint64_t pts_us = (uint64_t)v.timestamp.tv_sec * 1000000ULL +
+                          (uint64_t)v.timestamp.tv_usec;
+        if (n) {
+            if (n > cap->length || output(opaque, pts_us, cap->map, n) < 0)
+                return -1;
+            received++;
+        }
+        if (v.flags & V4L2_BUF_FLAG_LAST) break;
+    }
+    return received == expected_outputs ? 0 : -1;
+}
+
+void dmd_v4l2_enc_close(struct dmd_v4l2_enc *e)
+{
+    if (!e) return;
+    if (e->fd >= 0) {
+        int type;
+        if (e->out_streaming) {
+            type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+            ioctl(e->fd, VIDIOC_STREAMOFF, &type);
+        }
+        if (e->cap_streaming) {
+            type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+            ioctl(e->fd, VIDIOC_STREAMOFF, &type);
+        }
+        struct v4l2_requestbuffers rb;
+        memset(&rb, 0, sizeof(rb));
+        rb.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+        rb.memory = (enum v4l2_memory)e->buf_mem;
+        ioctl(e->fd, VIDIOC_REQBUFS, &rb);
+        memset(&rb, 0, sizeof(rb));
+        rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        rb.memory = (enum v4l2_memory)e->buf_mem;
+        ioctl(e->fd, VIDIOC_REQBUFS, &rb);
+    }
+    bufs_free(e->alloc.out, DMD_V4L2_MAX_OUT);
+    bufs_free(e->alloc.cap, DMD_V4L2_MAX_CAP);
+    if (e->alloc.heap_fd >= 0) close(e->alloc.heap_fd);
+    if (e->fd >= 0) close(e->fd);
+    free(e);
 }

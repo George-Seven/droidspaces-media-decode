@@ -24,6 +24,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <linux/dma-buf.h>
+#include <sys/ioctl.h>
 
 #include "driver.h"
 
@@ -456,5 +458,65 @@ VAStatus dmd_GetImage(VADriverContextP ctx, VASurfaceID surface, int x, int y,
 
     pthread_mutex_unlock(&drv->lock);
 
+    return VA_STATUS_SUCCESS;
+}
+
+/* Upload a software NV12 image into a VA surface. VAAPI encoders commonly
+ * receive their input through vaCreateImage + vaPutImage. */
+VAStatus dmd_PutImage(VADriverContextP ctx, VASurfaceID surface,
+                      VAImageID image, int src_x, int src_y,
+                      unsigned int src_width, unsigned int src_height,
+                      int dest_x, int dest_y, unsigned int dest_width,
+                      unsigned int dest_height)
+{
+    struct dmd_driver *drv = dmd_get_driver(ctx);
+    if (!drv) return VA_STATUS_ERROR_INVALID_PARAMETER;
+    if (src_x < 0 || src_y < 0 || dest_x < 0 || dest_y < 0 ||
+        !src_width || !src_height || src_width != dest_width ||
+        src_height != dest_height || ((src_x | src_y | dest_x | dest_y |
+        (int)src_width | (int)src_height) & 1))
+        return VA_STATUS_ERROR_INVALID_PARAMETER;
+
+    pthread_mutex_lock(&drv->lock);
+    struct dmd_image *img = dmd_find_image_locked(drv, image);
+    struct dmd_surface *s = dmd_find_surface_locked(drv, surface);
+    if (!img || !s) {
+        pthread_mutex_unlock(&drv->lock);
+        return !img ? VA_STATUS_ERROR_INVALID_IMAGE : VA_STATUS_ERROR_INVALID_SURFACE;
+    }
+    if (img->image.format.fourcc != VA_FOURCC_NV12 ||
+        s->format != VA_RT_FORMAT_YUV420 ||
+        (unsigned)src_x + src_width > img->image.width ||
+        (unsigned)src_y + src_height > img->image.height ||
+        (unsigned)dest_x + dest_width > s->width ||
+        (unsigned)dest_y + dest_height > s->height) {
+        pthread_mutex_unlock(&drv->lock);
+        return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
+    }
+
+    const unsigned char *src_y_plane = img->data + img->image.offsets[0];
+    const unsigned char *src_uv_plane = img->data + img->image.offsets[1];
+    unsigned char *dst_y_plane = s->data;
+    unsigned char *dst_uv_plane = s->data + (size_t)s->stride * s->slice_height;
+    if (s->dumb_sync_fd >= 0) {
+        struct dma_buf_sync sync = { .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE };
+        ioctl(s->dumb_sync_fd, DMA_BUF_IOCTL_SYNC, &sync);
+    }
+    for (unsigned int row = 0; row < src_height; row++)
+        memcpy(dst_y_plane + (size_t)(dest_y + (int)row) * s->stride + dest_x,
+               src_y_plane + (size_t)(src_y + (int)row) * img->image.pitches[0] + src_x,
+               src_width);
+    for (unsigned int row = 0; row < src_height / 2; row++)
+        memcpy(dst_uv_plane + (size_t)(dest_y / 2 + (int)row) * s->stride + dest_x,
+               src_uv_plane + (size_t)(src_y / 2 + (int)row) * img->image.pitches[1] + src_x,
+               src_width);
+
+    if (s->dumb_sync_fd >= 0) {
+        struct dma_buf_sync sync = { .flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE };
+        ioctl(s->dumb_sync_fd, DMA_BUF_IOCTL_SYNC, &sync);
+    }
+    s->state = DMD_SURFACE_READY;
+    s->decode_status = VA_STATUS_SUCCESS;
+    pthread_mutex_unlock(&drv->lock);
     return VA_STATUS_SUCCESS;
 }

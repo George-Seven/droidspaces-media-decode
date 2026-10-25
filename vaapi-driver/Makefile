@@ -56,6 +56,7 @@ LDLIBS  += -lpthread
 SOURCES := $(SRCDIR)/bitstream.c $(SRCDIR)/driver.c $(SRCDIR)/profiles.c $(SRCDIR)/stubs.c \
            $(SRCDIR)/dmd_v4l2_session.c \
           $(SRCDIR)/v4l2_backend.c $(SRCDIR)/decode.c $(SRCDIR)/image.c \
+           $(SRCDIR)/encode.c \
            $(SRCDIR)/h264_bitstream.c $(SRCDIR)/hevc_bitstream.c $(SRCDIR)/export.c \
            $(SRCDIR)/av1_bitstream.c $(SRCDIR)/mpeg2_bitstream.c
 OBJECTS := $(patsubst $(SRCDIR)/%.c,$(BUILD)/%.o,$(SOURCES))

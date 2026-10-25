@@ -15,6 +15,8 @@
 #include <va/va_dec_hevc.h>
 #include <va/va_dec_vp8.h>
 #include <va/va_dec_vp9.h>
+#include <va/va_enc_h264.h>
+#include <va/va_enc_hevc.h>
 /* struct drm_state 定义在这里，va_backend.h 只做前向声明。 */
 #include <va/va_drmcommon.h>
 
@@ -241,6 +243,16 @@ struct dmd_buffer {
     size_t size; /* element_size * num_elements */
     void *data;
     int mapped;
+    /* VAEncCodedBufferType maps as a VACodedBufferSegment list, not as its
+     * backing byte array. The byte array remains owned by data. */
+    VACodedBufferSegment coded_segment;
+    int coded_ready;
+};
+
+struct dmd_encode_pending {
+    VABufferID coded_id;
+    uint64_t pts_us;
+    int in_use;
 };
 
 /* 一个 image：VAImage 的后备存储。data 是普通 heap 内存
@@ -281,10 +293,26 @@ struct dmd_context {
     VAContextID id;
     VAConfigID config_id;
     VAProfile profile;
+    VAEntrypoint entrypoint;
     int codec; /* DMD_CODEC_* */
     unsigned int picture_width;
     unsigned int picture_height;
+    uint32_t enc_rate_control;
     int flag;
+
+    /* Encode state is populated only for VAEntrypointEncSlice contexts.
+     * The V4L2 encoder session is intentionally separate from the decoder
+     * session below; the two nodes have different queue protocols. */
+    struct dmd_v4l2_enc *encoder;
+    VAEncSequenceParameterBufferH264 enc_h264_seq;
+    VAEncPictureParameterBufferH264 enc_h264_pic;
+    VAEncSequenceParameterBufferHEVC enc_hevc_seq;
+    VAEncPictureParameterBufferHEVC enc_hevc_pic;
+    int have_enc_seq;
+    int have_enc_pic;
+    uint64_t encode_frame_count;
+    int encode_drained;
+    struct dmd_encode_pending encode_pending[DMD_MAX_SURFACES];
 
     /* V4L2 解码会话。惰性创建：CreateContext 时建，失败则留 NULL 由
      * EndPicture 重试 —— 建 context 时 daemon 不可用不该让整个初始化失败。 */
@@ -720,6 +748,38 @@ VAStatus dmd_RenderPicture(VADriverContextP ctx, VAContextID context,
 
 VAStatus dmd_EndPicture(VADriverContextP ctx, VAContextID context);
 
+/* ---- v4l2_encode.c: V4L2 encoder session and VA-API encode dispatch ---- */
+int dmd_v4l2_enc_probe(int codec);
+struct dmd_v4l2_enc *dmd_v4l2_enc_open(int codec, VAProfile profile,
+                                        unsigned int width,
+                                        unsigned int height,
+                                        unsigned int visible_width,
+                                        unsigned int visible_height,
+                                        unsigned int bitrate,
+                                        unsigned int gop,
+                                        uint32_t rate_control);
+int dmd_v4l2_enc_frame(struct dmd_v4l2_enc *enc, struct dmd_surface *surface,
+                       const void *src, size_t src_size, void *dst,
+                       size_t dst_capacity, size_t *dst_size,
+                       uint64_t *dst_pts_us,
+                       int force_keyframe);
+typedef int (*dmd_v4l2_enc_output_fn)(void *opaque, uint64_t pts_us,
+                                     const void *data, size_t size);
+int dmd_v4l2_enc_drain(struct dmd_v4l2_enc *enc,
+                       dmd_v4l2_enc_output_fn output, void *opaque,
+                       unsigned int expected_outputs);
+void dmd_v4l2_enc_set_controls(struct dmd_v4l2_enc *enc,
+                               unsigned int bitrate, unsigned int gop);
+void dmd_v4l2_enc_close(struct dmd_v4l2_enc *enc);
+VAStatus dmd_encode_begin(VADriverContextP ctx, VAContextID context,
+                          VASurfaceID render_target);
+VAStatus dmd_encode_render(VADriverContextP ctx, VAContextID context,
+                           VABufferID *buffers, int num_buffers);
+VAStatus dmd_encode_end(VADriverContextP ctx, VAContextID context);
+VAStatus dmd_encode_destroy_context(VADriverContextP ctx, VAContextID context);
+VAStatus dmd_encode_sync_buffer(VADriverContextP ctx, VABufferID buffer,
+                                uint64_t timeout_ns);
+
 VAStatus dmd_SyncSurface(VADriverContextP ctx, VASurfaceID render_target);
 
 VAStatus dmd_SyncSurface2(VADriverContextP ctx, VASurfaceID surface,
@@ -759,6 +819,11 @@ VAStatus dmd_DestroyImage(VADriverContextP ctx, VAImageID image);
 
 VAStatus dmd_GetImage(VADriverContextP ctx, VASurfaceID surface, int x, int y,
                       unsigned int width, unsigned int height, VAImageID image);
+
+VAStatus dmd_PutImage(VADriverContextP ctx, VASurfaceID surface, VAImageID image,
+                      int src_x, int src_y, unsigned int src_width,
+                      unsigned int src_height, int dest_x, int dest_y,
+                      unsigned int dest_width, unsigned int dest_height);
 
 /* ---- 跨文件内部辅助（均要求调用方已持 drv->lock） ---- */
 

@@ -46,23 +46,6 @@ VAStatus dmd_SetImagePalette(VADriverContextP ctx, VAImageID image, unsigned cha
     return VA_STATUS_ERROR_UNIMPLEMENTED;
 }
 
-VAStatus dmd_PutImage(VADriverContextP ctx, VASurfaceID surface, VAImageID image, int src_x, int src_y, unsigned int src_width, unsigned int src_height, int dest_x, int dest_y, unsigned int dest_width, unsigned int dest_height)
-{
-    (void)ctx;
-    (void)surface;
-    (void)image;
-    (void)src_x;
-    (void)src_y;
-    (void)src_width;
-    (void)src_height;
-    (void)dest_x;
-    (void)dest_y;
-    (void)dest_width;
-    (void)dest_height;
-    dmd_log("未实现入口被调用: vaPutImage\n");
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
-}
-
 VAStatus dmd_CreateSubpicture(VADriverContextP ctx, VAImageID image, VASubpictureID *subpicture)
 {
     (void)ctx;
@@ -252,11 +235,11 @@ VAStatus dmd_QueryProcessingRate(VADriverContextP ctx, VAConfigID config_id, VAP
 
 VAStatus dmd_SyncBuffer(VADriverContextP ctx, VABufferID buf_id, uint64_t timeout_ns)
 {
-    (void)ctx;
-    (void)buf_id;
-    (void)timeout_ns;
-    dmd_log("未实现入口被调用: vaSyncBuffer\n");
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
+    if (buf_id == VA_INVALID_ID)
+        /* FFmpeg probes support with VA_INVALID_ID before enabling its
+         * standard asynchronous encoder path. */
+        return VA_STATUS_SUCCESS;
+    return dmd_encode_sync_buffer(ctx, buf_id, timeout_ns);
 }
 
 VAStatus dmd_Copy(VADriverContextP ctx, VACopyObject *dst, VACopyObject *src, VACopyOption option)

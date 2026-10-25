@@ -41,6 +41,7 @@ no root, no SELinux domain switch, no daemon, no shared memory.
 | Node | Purpose | Required? |
 |---|---|---|
 | `/dev/video32` | msm_vidc decoder (V4L2 M2M) | **Required** |
+| `/dev/video33` | msm_vidc encoder (H.264 / HEVC) | **Required for encoding** |
 | `/dev/dma_heap/system` | DMABUF source (kernel 5.x) | **Either this** |
 | `/dev/ion` | DMABUF source (kernel 4.14 and similar) | **or this** |
 

@@ -174,6 +174,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct dmd_surface;
+
 /* 与 decode-daemon.c 的 CodecId 对应（wire id，追加式，不可重排）。
  *
  * ⚠️ 0.4.2 更正：VP8 恢复启用，编号 3 就是它原本的号（不是新占号）。
@@ -239,6 +241,22 @@ struct dmd_v4l2_dec {
     int      buf_mem;                         /* 队列内存模式 V4L2_MEMORY_* */
     int      draining;                        /* 已送 EOS，等剩余帧 */
     int      saw_eos;
+};
+
+/* V4L2 encoder state. Input surfaces are imported as dma-bufs; encoded
+ * CAPTURE buffers are allocated from the same system heap used by decode. */
+struct dmd_v4l2_enc {
+    int fd;
+    int codec;
+    int width, height;
+    uint32_t out_fourcc, cap_fourcc;
+    unsigned input_size, output_size;
+    int n_out, n_cap;
+    int buf_mem;
+    int out_streaming, cap_streaming;
+    struct dmd_v4l2_dec alloc; /* shared dma-heap/ION allocator and mappings */
+    unsigned int frame_number;
+    int stopped;
 };
 
 /*

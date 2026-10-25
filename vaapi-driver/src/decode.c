@@ -134,6 +134,9 @@ void dmd_context_reset_locked(struct dmd_context *c)
     free(c->av1_repair_buf);
     free(c->av1_next_repair_buf);
     c->av1_repair_buf = c->av1_next_repair_buf = NULL;
+    if (c->encoder)
+        dmd_v4l2_enc_close(c->encoder);
+    c->encoder = NULL;
     if (c->session)
         dmd_session_destroy(c->session);
     free(c->slice_data);
@@ -921,8 +924,10 @@ VAStatus dmd_CreateContext(VADriverContextP ctx, VAConfigID config_id,
     *context = VA_INVALID_ID;
 
     VAProfile profile;
+    VAEntrypoint entrypoint;
     int codec;
     int slot_idx = -1;
+    uint32_t enc_rate_control = VA_RC_VBR;
 
     pthread_mutex_lock(&drv->lock);
 
@@ -939,6 +944,12 @@ VAStatus dmd_CreateContext(VADriverContextP ctx, VAConfigID config_id,
         return VA_STATUS_ERROR_INVALID_CONFIG;
     }
     profile = cfg->profile;
+    entrypoint = cfg->entrypoint;
+    if (entrypoint == VAEntrypointEncSlice) {
+        for (int i = 0; i < cfg->num_attribs; i++)
+            if (cfg->attribs[i].type == VAConfigAttribRateControl)
+                enc_rate_control = cfg->attribs[i].value;
+    }
     codec = dmd_profile_to_codec(profile);
     if (codec < 0) {
         pthread_mutex_unlock(&drv->lock);
@@ -971,14 +982,24 @@ VAStatus dmd_CreateContext(VADriverContextP ctx, VAConfigID config_id,
     c->id = (VAContextID)(drv->next_context_id++);
     c->config_id = config_id;
     c->profile = profile;
+    c->entrypoint = entrypoint;
     c->codec = codec;
     c->picture_width = (unsigned int)picture_width;
     c->picture_height = (unsigned int)picture_height;
+    c->enc_rate_control = enc_rate_control;
     c->flag = flag;
     c->current_target = VA_INVALID_ID;
 
     VAContextID new_id = c->id;
     pthread_mutex_unlock(&drv->lock);
+
+    if (entrypoint == VAEntrypointEncSlice) {
+        *context = new_id;
+        dmd_log("CreateContext: deferred encoder config=%u profile=%d %dx%d -> context=%u\n",
+                (unsigned)config_id, (int)profile, picture_width,
+                picture_height, (unsigned)new_id);
+        return VA_STATUS_SUCCESS;
+    }
 
     /* 会话建立在放锁后做 —— connect + 握手是阻塞 IO，持锁做会卡住
      * 其他线程的所有对象操作。 */
@@ -1028,6 +1049,11 @@ VAStatus dmd_DestroyContext(VADriverContextP ctx, VAContextID context)
     if (!c) {
         pthread_mutex_unlock(&drv->lock);
         return VA_STATUS_ERROR_INVALID_CONTEXT;
+    }
+
+    if (c->entrypoint == VAEntrypointEncSlice) {
+        pthread_mutex_unlock(&drv->lock);
+        return dmd_encode_destroy_context(ctx, context);
     }
 
     if (c->codec == DMD_CODEC_AV1 && c->av1_sef_visits)
@@ -1236,6 +1262,10 @@ VAStatus dmd_CreateBuffer(VADriverContextP ctx, VAContextID context,
     slot->num_elements = num_elements;
     slot->size = total;
     slot->data = mem;
+    if (type == VAEncCodedBufferType) {
+        memset(&slot->coded_segment, 0, sizeof(slot->coded_segment));
+        slot->coded_segment.buf = mem;
+    }
 
     *buf_id = slot->id;
     pthread_mutex_unlock(&drv->lock);
@@ -1277,6 +1307,8 @@ VAStatus dmd_BufferSetNumElements(VADriverContextP ctx, VABufferID buf_id,
         } else {
             memset((unsigned char *)mem + b->size, 0, total - b->size);
             b->data = mem;
+            if (b->type == VAEncCodedBufferType)
+                b->coded_segment.buf = mem;
         }
     }
     if (status == VA_STATUS_SUCCESS) {
@@ -1301,7 +1333,8 @@ VAStatus dmd_MapBuffer(VADriverContextP ctx, VABufferID buf_id, void **pbuf)
     struct dmd_buffer *b = dmd_find_buffer_locked(drv, buf_id);
     if (b) {
         b->mapped++;
-        *pbuf = b->data;
+        *pbuf = b->type == VAEncCodedBufferType
+              ? (void *)&b->coded_segment : b->data;
         pthread_mutex_unlock(&drv->lock);
         return VA_STATUS_SUCCESS;
     }
@@ -1468,6 +1501,10 @@ VAStatus dmd_BeginPicture(VADriverContextP ctx, VAContextID context,
         pthread_mutex_unlock(&drv->lock);
         return VA_STATUS_ERROR_INVALID_CONTEXT;
     }
+    if (c->entrypoint == VAEntrypointEncSlice) {
+        pthread_mutex_unlock(&drv->lock);
+        return dmd_encode_begin(ctx, context, render_target);
+    }
     struct dmd_surface *s = dmd_find_surface_locked(drv, render_target);
     if (!s) {
         pthread_mutex_unlock(&drv->lock);
@@ -1521,6 +1558,10 @@ VAStatus dmd_RenderPicture(VADriverContextP ctx, VAContextID context,
     if (!c) {
         pthread_mutex_unlock(&drv->lock);
         return VA_STATUS_ERROR_INVALID_CONTEXT;
+    }
+    if (c->entrypoint == VAEntrypointEncSlice) {
+        pthread_mutex_unlock(&drv->lock);
+        return dmd_encode_render(ctx, context, buffers, num_buffers);
     }
     if (c->current_target == VA_INVALID_ID) {
         pthread_mutex_unlock(&drv->lock);
@@ -2615,6 +2656,10 @@ VAStatus dmd_EndPicture(VADriverContextP ctx, VAContextID context)
     if (!c) {
         pthread_mutex_unlock(&drv->lock);
         return VA_STATUS_ERROR_INVALID_CONTEXT;
+    }
+    if (c->entrypoint == VAEntrypointEncSlice) {
+        pthread_mutex_unlock(&drv->lock);
+        return dmd_encode_end(ctx, context);
     }
     if (c->current_target == VA_INVALID_ID) {
         pthread_mutex_unlock(&drv->lock);

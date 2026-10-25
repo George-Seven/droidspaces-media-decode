@@ -248,9 +248,18 @@ VAStatus dmd_QueryConfigEntrypoints(VADriverContextP ctx, VAProfile profile,
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
     }
 
-    /* 只做解码。编码（/dev/video33）是另一个项目，这里不声明。 */
-    entrypoint_list[0] = VAEntrypointVLD;
-    *num_entrypoints = 1;
+    int n = 0;
+    entrypoint_list[n++] = VAEntrypointVLD;
+    /* Encoder capability is queried independently from decoder capability:
+     * on Qualcomm the encoder is a separate V4L2 node with its own formats. */
+    if ((profile == VAProfileH264ConstrainedBaseline ||
+         profile == VAProfileH264Main || profile == VAProfileH264High) &&
+        dmd_v4l2_enc_probe(DMD_CODEC_H264))
+        entrypoint_list[n++] = VAEntrypointEncSlice;
+    else if (profile == VAProfileHEVCMain &&
+             dmd_v4l2_enc_probe(DMD_CODEC_HEVC))
+        entrypoint_list[n++] = VAEntrypointEncSlice;
+    *num_entrypoints = n;
     return VA_STATUS_SUCCESS;
 }
 
@@ -282,8 +291,14 @@ VAStatus dmd_GetConfigAttributes(VADriverContextP ctx, VAProfile profile,
 
     if (!dmd_profile_supported(profile))
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
-    if (entrypoint != VAEntrypointVLD)
+    if (entrypoint == VAEntrypointEncSlice) {
+        int codec = dmd_profile_to_codec(profile);
+        if ((codec != DMD_CODEC_H264 && codec != DMD_CODEC_HEVC) ||
+            !dmd_v4l2_enc_probe(codec))
+            return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
+    } else if (entrypoint != VAEntrypointVLD) {
         return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
+    }
 
     /* VA-API 约定：调用方传入想查的 attribute type，driver 填 value；
      * 不支持的项必须填 VA_ATTRIB_NOT_SUPPORTED 而不是报错。 */
@@ -293,6 +308,23 @@ VAStatus dmd_GetConfigAttributes(VADriverContextP ctx, VAProfile profile,
             /* 8-bit 4:2:0 NV12；AV1 再加一个 10-bit P010。 */
             attrib_list[i].value = rt_formats_for_profile(profile);
             break;
+        case VAConfigAttribRateControl:
+            attrib_list[i].value = entrypoint == VAEntrypointEncSlice
+                ? (VA_RC_CBR | VA_RC_VBR) : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribEncPackedHeaders:
+            /* This backend lets Venus generate sequence and picture headers. */
+            attrib_list[i].value = entrypoint == VAEntrypointEncSlice
+                ? 0 : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribEncMaxRefFrames:
+            /* The V4L2 backend currently runs low-delay P encoding: one
+             * previous-frame reference and no list-1/B-frame references.
+             * VA-API packs list 0 in the low 16 bits and list 1 in the high
+             * 16 bits. */
+            attrib_list[i].value = entrypoint == VAEntrypointEncSlice
+                ? 1 : VA_ATTRIB_NOT_SUPPORTED;
+            break;
         case VAConfigAttribMaxPictureWidth:
             attrib_list[i].value = DMD_MAX_WIDTH;
             break;
@@ -301,7 +333,8 @@ VAStatus dmd_GetConfigAttributes(VADriverContextP ctx, VAProfile profile,
             break;
         case VAConfigAttribDecSliceMode:
             /* daemon 接收的是完整 Annex B 数据单元，对应 normal slice 模式。 */
-            attrib_list[i].value = VA_DEC_SLICE_MODE_NORMAL;
+            attrib_list[i].value = entrypoint == VAEntrypointVLD
+                ? VA_DEC_SLICE_MODE_NORMAL : VA_ATTRIB_NOT_SUPPORTED;
             break;
         default:
             attrib_list[i].value = VA_ATTRIB_NOT_SUPPORTED;
@@ -327,8 +360,14 @@ VAStatus dmd_CreateConfig(VADriverContextP ctx, VAProfile profile,
 
     if (!dmd_profile_supported(profile))
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
-    if (entrypoint != VAEntrypointVLD)
+    if (entrypoint == VAEntrypointEncSlice) {
+        int codec = dmd_profile_to_codec(profile);
+        if ((codec != DMD_CODEC_H264 && codec != DMD_CODEC_HEVC) ||
+            !dmd_v4l2_enc_probe(codec))
+            return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
+    } else if (entrypoint != VAEntrypointVLD) {
         return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
+    }
 
     VAStatus status = VA_STATUS_ERROR_ALLOCATION_FAILED;
 
@@ -430,6 +469,7 @@ VAStatus dmd_QueryConfigAttributes(VADriverContextP ctx, VAConfigID config_id,
          * CreateConfig 传了什么，RTFormat 一定出现在返回集里。 */
         int n = 0;
         int have_rtformat = 0;
+        int have_rc = 0, have_packed = 0, have_refs = 0;
         const uint32_t rt = rt_formats_for_profile(cfg->profile);
 
         for (int i = 0; i < cfg->num_attribs && n < DMD_MAX_CONFIG_ATTRIBUTES; i++) {
@@ -438,6 +478,21 @@ VAStatus dmd_QueryConfigAttributes(VADriverContextP ctx, VAConfigID config_id,
                 attrib_list[n].type = VAConfigAttribRTFormat;
                 attrib_list[n].value = rt;
                 have_rtformat = 1;
+            } else if (cfg->attribs[i].type == VAConfigAttribRateControl &&
+                       cfg->entrypoint == VAEntrypointEncSlice) {
+                attrib_list[n] = cfg->attribs[i];
+                attrib_list[n].value = VA_RC_CBR | VA_RC_VBR;
+                have_rc = 1;
+            } else if (cfg->attribs[i].type == VAConfigAttribEncPackedHeaders &&
+                       cfg->entrypoint == VAEntrypointEncSlice) {
+                attrib_list[n] = cfg->attribs[i];
+                attrib_list[n].value = 0;
+                have_packed = 1;
+            } else if (cfg->attribs[i].type == VAConfigAttribEncMaxRefFrames &&
+                       cfg->entrypoint == VAEntrypointEncSlice) {
+                attrib_list[n] = cfg->attribs[i];
+                attrib_list[n].value = 1;
+                have_refs = 1;
             } else {
                 attrib_list[n] = cfg->attribs[i];
             }
@@ -448,6 +503,20 @@ VAStatus dmd_QueryConfigAttributes(VADriverContextP ctx, VAConfigID config_id,
             attrib_list[n].type = VAConfigAttribRTFormat;
             attrib_list[n].value = rt;
             n++;
+        }
+        if (cfg->entrypoint == VAEntrypointEncSlice) {
+            if (!have_rc && n < DMD_MAX_CONFIG_ATTRIBUTES) {
+                attrib_list[n].type = VAConfigAttribRateControl;
+                attrib_list[n++].value = VA_RC_CBR | VA_RC_VBR;
+            }
+            if (!have_packed && n < DMD_MAX_CONFIG_ATTRIBUTES) {
+                attrib_list[n].type = VAConfigAttribEncPackedHeaders;
+                attrib_list[n++].value = 0;
+            }
+            if (!have_refs && n < DMD_MAX_CONFIG_ATTRIBUTES) {
+                attrib_list[n].type = VAConfigAttribEncMaxRefFrames;
+                attrib_list[n++].value = 1;
+            }
         }
 
         *num_attribs = n;

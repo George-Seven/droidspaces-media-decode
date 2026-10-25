@@ -8,7 +8,6 @@
 VAStatus dmd_QuerySurfaceError(VADriverContextP ctx, VASurfaceID render_target, VAStatus error_status, void **error_info);
 VAStatus dmd_PutSurface(VADriverContextP ctx, VASurfaceID surface, void*draw, short srcx, short srcy, unsigned short srcw, unsigned short srch, short destx, short desty, unsigned short destw, unsigned short desth, VARectangle *cliprects, unsigned int number_cliprects, unsigned int flags);
 VAStatus dmd_SetImagePalette(VADriverContextP ctx, VAImageID image, unsigned char *palette);
-VAStatus dmd_PutImage(VADriverContextP ctx, VASurfaceID surface, VAImageID image, int src_x, int src_y, unsigned int src_width, unsigned int src_height, int dest_x, int dest_y, unsigned int dest_width, unsigned int dest_height);
 VAStatus dmd_CreateSubpicture(VADriverContextP ctx, VAImageID image, VASubpictureID *subpicture);
 VAStatus dmd_DestroySubpicture(VADriverContextP ctx, VASubpictureID subpicture);
 VAStatus dmd_SetSubpictureImage(VADriverContextP ctx, VASubpictureID subpicture, VAImageID image);

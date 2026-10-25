@@ -10,10 +10,29 @@ Artifact: `msm_drm_drv_video.so`, installed into `/usr/lib/aarch64-linux-gnu/dri
 
 ## Current capability boundary
 
-**Implemented: capability query + H.264 / HEVC / VP9 / VP8 decode data path.** `vainfo`
-lists the profiles and config attributes; all four have been taken end to end on real
-hardware and produce a picture, and the hardware-decoded output is **byte-for-byte
-identical** to software decode.
+**Decode:** capability query + H.264 / HEVC / VP9 / VP8 data paths, all verified on
+real hardware and byte-for-byte identical to software decode.
+
+**Encode:** `VAEntrypointEncSlice` targets `/dev/video33` for H.264 and HEVC. It
+uploads NV12 images, configures V4L2 queues and controls, and returns encoded data
+through `VACodedBufferSegment`. Encoder profiles are listed only when the node accepts
+NV12 and the corresponding compressed format. H.264 and HEVC streams have been
+verified on hardware, including complete frame counts after draining the encoder.
+
+The msm_vidc encoder initially returned empty CAPTURE buffers because the whole
+required CAPTURE pool was queued at startup. The driver now allocates the required
+pool but queues and recycles one CAPTURE buffer, reducing output delay to one frame.
+It implements VA coded-buffer synchronization so FFmpeg's normal async depth of two
+can collect the delayed output and drain the final frame. No encoder-specific FFmpeg
+options or environment variables are required.
+
+```sh
+LIBVA_DRIVER_NAME=msm_drm ffmpeg \
+  -init_hw_device vaapi=va:/dev/dri/renderD128 \
+  -hwaccel vaapi -hwaccel_device va -hwaccel_output_format vaapi \
+  -i in.mp4 -vf 'scale_vaapi=format=nv12' \
+  -c:v h264_vaapi -b:v 2M -an out.mp4
+```
 
 Actual status per codec:
 
