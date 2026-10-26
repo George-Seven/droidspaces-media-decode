@@ -38,6 +38,18 @@ LIBVA_DRIVER_NAME=msm_drm ffmpeg \
   -c:v h264_vaapi -b:v 2M -an out.mp4
 ```
 
+The driver's VAAPI video-processing path also handles clockwise quarter-turn
+rotation through `transpose_vaapi`. For inputs whose container stores a 90°
+display transform, `-noautorotate` leaves the decoded pixels sideways; request
+the rotation explicitly and swap the scale dimensions, for example:
+
+```sh
+-vf 'scale_vaapi=w=960:h=540:format=nv12,transpose_vaapi=dir=clock'
+```
+
+Scaling and rotation currently run on CPU-backed NV12 surfaces in this driver's
+VPP implementation.
+
 Actual status per codec:
 
 | Profile | daemon codec | Capability query | Decodes to picture | Verification result |

@@ -321,6 +321,7 @@ struct dmd_context {
     VASurfaceID vpp_source;
     VARectangle vpp_source_region;
     VARectangle vpp_output_region;
+    uint32_t vpp_rotation;
     int vpp_has_source_region;
     int vpp_has_output_region;
     int vpp_have_params;

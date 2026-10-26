@@ -9,22 +9,41 @@ static void scale_plane_bilinear(const uint8_t *src, unsigned src_stride,
                                  uint8_t *dst, unsigned dst_stride,
                                  unsigned dst_x, unsigned dst_y,
                                  unsigned dst_w, unsigned dst_h,
-                                 unsigned components)
+                                 unsigned components, uint32_t rotation)
 {
     for (unsigned y = 0; y < dst_h; y++) {
-        double fy = ((double)y + 0.5) * src_h / dst_h - 0.5;
-        if (fy < 0.0) fy = 0.0;
-        unsigned y0 = (unsigned)fy;
-        if (y0 >= src_h) y0 = src_h - 1;
-        unsigned y1 = y0 + 1 < src_h ? y0 + 1 : y0;
-        double wy = fy - y0;
         for (unsigned x = 0; x < dst_w; x++) {
-            double fx = ((double)x + 0.5) * src_w / dst_w - 0.5;
+            double u = ((double)x + 0.5) / dst_w;
+            double v = ((double)y + 0.5) / dst_h;
+            double fx, fy;
+            switch (rotation) {
+            case VA_ROTATION_90:  /* clockwise */
+                fx = v * src_w - 0.5;
+                fy = (1.0 - u) * src_h - 0.5;
+                break;
+            case VA_ROTATION_180:
+                fx = (1.0 - u) * src_w - 0.5;
+                fy = (1.0 - v) * src_h - 0.5;
+                break;
+            case VA_ROTATION_270: /* counter-clockwise */
+                fx = (1.0 - v) * src_w - 0.5;
+                fy = u * src_h - 0.5;
+                break;
+            default:
+                fx = u * src_w - 0.5;
+                fy = v * src_h - 0.5;
+                break;
+            }
             if (fx < 0.0) fx = 0.0;
+            if (fy < 0.0) fy = 0.0;
             unsigned x0 = (unsigned)fx;
+            unsigned y0 = (unsigned)fy;
             if (x0 >= src_w) x0 = src_w - 1;
+            if (y0 >= src_h) y0 = src_h - 1;
             unsigned x1 = x0 + 1 < src_w ? x0 + 1 : x0;
+            unsigned y1 = y0 + 1 < src_h ? y0 + 1 : y0;
             double wx = fx - x0;
+            double wy = fy - y0;
             for (unsigned c = 0; c < components; c++) {
                 unsigned a = src[(src_y + y0) * src_stride +
                                  (src_x + x0) * components + c];
@@ -75,12 +94,20 @@ VAStatus dmd_vpp_render(VADriverContextP ctx, VAContextID context,
 
         const VAProcPipelineParameterBuffer *p = b->data;
         if (p->num_filters || p->num_forward_references ||
-            p->num_backward_references || p->rotation_state != VA_ROTATION_NONE ||
+            p->num_backward_references ||
             p->mirror_state != VA_MIRROR_NONE || p->num_additional_outputs) {
             status = VA_STATUS_ERROR_UNIMPLEMENTED;
             break;
         }
+        if (p->rotation_state != VA_ROTATION_NONE &&
+            p->rotation_state != VA_ROTATION_90 &&
+            p->rotation_state != VA_ROTATION_180 &&
+            p->rotation_state != VA_ROTATION_270) {
+            status = VA_STATUS_ERROR_INVALID_PARAMETER;
+            break;
+        }
         c->vpp_source = p->surface;
+        c->vpp_rotation = p->rotation_state;
         c->vpp_has_source_region = p->surface_region != NULL;
         if (p->surface_region)
             c->vpp_source_region = *p->surface_region;
@@ -106,6 +133,7 @@ VAStatus dmd_vpp_end(VADriverContextP ctx, VAContextID context)
         return VA_STATUS_ERROR_INVALID_CONTEXT;
     }
     VASurfaceID source_id = c->vpp_source;
+    uint32_t rotation = c->vpp_rotation;
     pthread_mutex_unlock(&drv->lock);
 
     VAStatus ready = dmd_surface_wait(drv, source_id);
@@ -153,13 +181,13 @@ VAStatus dmd_vpp_end(VADriverContextP ctx, VAContextID context)
                          sr.width, sr.height,
                          dst->data, dst->stride,
                          (unsigned)dr.x, (unsigned)dr.y,
-                         dr.width, dr.height, 1);
+                         dr.width, dr.height, 1, rotation);
     scale_plane_bilinear(src->data + src_y_size, src->stride,
                          (unsigned)sr.x / 2, (unsigned)sr.y / 2,
                          sr.width / 2, sr.height / 2,
                          dst->data + dst_y_size, dst->stride,
                          (unsigned)dr.x / 2, (unsigned)dr.y / 2,
-                         dr.width / 2, dr.height / 2, 2);
+                         dr.width / 2, dr.height / 2, 2, rotation);
 
     dst->state = DMD_SURFACE_READY;
     dst->decode_status = VA_STATUS_SUCCESS;
@@ -219,6 +247,10 @@ VAStatus dmd_vpp_query_pipeline_caps(VADriverContextP ctx,
 
     memset(caps, 0, sizeof(*caps));
     caps->filter_flags = VA_FILTER_INTERPOLATION_BILINEAR;
+    caps->rotation_flags = (1u << VA_ROTATION_NONE) |
+                           (1u << VA_ROTATION_90) |
+                           (1u << VA_ROTATION_180) |
+                           (1u << VA_ROTATION_270);
     caps->input_color_standards = standards;
     caps->num_input_color_standards = sizeof(standards) / sizeof(standards[0]);
     caps->output_color_standards = standards;

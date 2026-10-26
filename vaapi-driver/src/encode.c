@@ -70,7 +70,7 @@ VAStatus dmd_encode_begin(VADriverContextP ctx, VAContextID context,
         pthread_mutex_unlock(&drv->lock);
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
-    if (s->width != c->picture_width || s->height > c->picture_height ||
+    if (s->width > c->picture_width || s->height > c->picture_height ||
         s->buf_width < dmd_align_up(c->picture_width, DMD_WIDTH_ALIGN) ||
         s->buf_height < dmd_align_up(c->picture_height, DMD_HEIGHT_ALIGN)) {
         dmd_log("encode BeginPicture: size mismatch id=%u surface=%ux%u context=%ux%u\n",
@@ -89,7 +89,7 @@ VAStatus dmd_encode_begin(VADriverContextP ctx, VAContextID context,
         s = dmd_find_surface_locked(drv, render_target);
         if (!c || c->entrypoint != VAEntrypointEncSlice || !s ||
             s->format != VA_RT_FORMAT_YUV420 || !s->data ||
-            s->width != c->picture_width || s->height > c->picture_height ||
+            s->width > c->picture_width || s->height > c->picture_height ||
             s->buf_width < dmd_align_up(c->picture_width, DMD_WIDTH_ALIGN) ||
             s->buf_height < dmd_align_up(c->picture_height, DMD_HEIGHT_ALIGN)) {
             dmd_log("encode BeginPicture: waited surface invalid id=%u found=%d size=%ux%u context=%ux%u format=0x%x data=%p\n",

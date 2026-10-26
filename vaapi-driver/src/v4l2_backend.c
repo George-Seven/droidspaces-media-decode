@@ -1720,7 +1720,7 @@ int dmd_v4l2_enc_frame(struct dmd_v4l2_enc *e, struct dmd_surface *surface,
     if (!e || e->fd < 0 || !surface || !dst || !dst_size ||
         !dst_pts_us || e->stopped ||
         surface->format != VA_RT_FORMAT_YUV420 ||
-        surface->width != (unsigned)e->width ||
+        surface->width > (unsigned)e->width ||
         surface->height > (unsigned)e->height ||
         surface->buf_width < (unsigned)((e->width + 127) & ~127) ||
         surface->buf_height < (unsigned)((e->height + 31) & ~31) ||
