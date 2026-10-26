@@ -17,3 +17,8 @@ Both metadata patches target Jellyfin 12.2 and Jellyfin FFmpeg 8 source
 respectively. The Jellyfin change alone works with muxers that already convert
 `rotate` stream metadata into a display matrix (for example, the tested stock
 FFmpeg 6 MP4/fMP4 muxer).
+
+For variable-frame-rate inputs whose `r_frame_rate` incorrectly reports the MP4
+90 kHz timebase, use `jellyfin-v12.2-hls-vfr-timestamps.patch`. It selects
+passthrough frame sync for encoded HLS output and uses Jellyfin's
+`ReferenceFrameRate` for HLS playlist and keyframe interval calculations.
