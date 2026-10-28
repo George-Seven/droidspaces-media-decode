@@ -1922,7 +1922,9 @@ int dmd_v4l2_enc_drain(struct dmd_v4l2_enc *e,
     e->stopped = 1;
 
     unsigned int received = 0;
-    while (received < expected_outputs) {
+    int last_cap_index = -1;
+    int saw_last = 0;
+    while (!saw_last) {
         struct pollfd pfd = { .fd = e->fd, .events = POLLIN | POLLERR };
         int pr;
         do { pr = poll(&pfd, 1, 5000); } while (pr < 0 && errno == EINTR);
@@ -1943,18 +1945,44 @@ int dmd_v4l2_enc_drain(struct dmd_v4l2_enc *e,
             return -1;
 
         struct dmd_v4l2_buf *cap = &e->alloc.cap[v.index];
+        last_cap_index = v.index;
         cap->queued = 0;
         size_t n = p[0].bytesused;
         uint64_t pts_us = (uint64_t)v.timestamp.tv_sec * 1000000ULL +
                           (uint64_t)v.timestamp.tv_usec;
         if (n) {
-            if (n > cap->length || output(opaque, pts_us, cap->map, n) < 0)
+            if (received >= expected_outputs || n > cap->length ||
+                output(opaque, pts_us, cap->map, n) < 0)
                 return -1;
             received++;
         }
-        if (v.flags & V4L2_BUF_FLAG_LAST) break;
+        saw_last = (v.flags & V4L2_BUF_FLAG_LAST) != 0;
+        if (!saw_last &&
+            enc_qbuf(e, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+                     (int)v.index, cap, 0, 0) < 0)
+            return -1;
     }
-    return received == expected_outputs ? 0 : -1;
+    if (received != expected_outputs || last_cap_index < 0 ||
+        last_cap_index >= e->n_cap)
+        return -1;
+
+    /* Synchronizing a single in-flight VAAPI picture can force this drain
+     * before FFmpeg submits the next frame. Qualcomm's encoder supports the
+     * V4L2 START command as the matching drain-resume operation. Resume first
+     * (it clears VB2's LAST-buffer state), then queue one CAPTURE buffer so
+     * the session can continue without restarting the encoder or breaking
+     * reference continuity. */
+    struct v4l2_encoder_cmd start;
+    memset(&start, 0, sizeof(start));
+    start.cmd = V4L2_ENC_CMD_START;
+    if (xioctl(e->fd, VIDIOC_ENCODER_CMD, &start,
+               "encoder CMD_START(resume after sync)") < 0)
+        return -1;
+    if (enc_qbuf(e, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+                 last_cap_index, &e->alloc.cap[last_cap_index], 0, 0) < 0)
+        return -1;
+    e->stopped = 0;
+    return 0;
 }
 
 void dmd_v4l2_enc_close(struct dmd_v4l2_enc *e)

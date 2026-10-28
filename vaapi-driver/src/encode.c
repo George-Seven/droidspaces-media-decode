@@ -303,8 +303,8 @@ VAStatus dmd_encode_end(VADriverContextP ctx, VAContextID context)
     }
     pthread_mutex_lock(&drv->lock);
     c = dmd_find_context_locked(drv, context);
-    if (!c || c->encode_drained) {
-        dmd_log("encode EndPicture: context disappeared or is drained (context=%u)\n",
+    if (!c) {
+        dmd_log("encode EndPicture: context disappeared (context=%u)\n",
                 (unsigned)context);
         if (c) {
             c->current_target = VA_INVALID_ID;
@@ -413,7 +413,7 @@ VAStatus dmd_encode_sync_buffer(VADriverContextP ctx, VABufferID buffer,
             break;
         }
     }
-    if (!found || c->encode_drained) {
+    if (!found) {
         pthread_mutex_unlock(&drv->lock);
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
@@ -458,7 +458,6 @@ VAStatus dmd_encode_sync_buffer(VADriverContextP ctx, VABufferID buffer,
     pthread_cond_broadcast(&drv->io_done);
     c = dmd_find_context_locked(drv, context);
     coded = dmd_find_buffer_locked(drv, buffer);
-    if (c && rc == 0) c->encode_drained = 1;
     int ready = coded && coded->coded_ready;
     pthread_mutex_unlock(&drv->lock);
     return rc == 0 && ready ? VA_STATUS_SUCCESS

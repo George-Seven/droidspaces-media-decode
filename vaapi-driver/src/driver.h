@@ -315,7 +315,6 @@ struct dmd_context {
     int have_enc_seq;
     int have_enc_pic;
     uint64_t encode_frame_count;
-    int encode_drained;
     struct dmd_encode_pending encode_pending[DMD_MAX_SURFACES];
 
     VASurfaceID vpp_source;
