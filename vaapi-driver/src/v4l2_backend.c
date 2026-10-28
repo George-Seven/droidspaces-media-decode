@@ -1757,19 +1757,31 @@ int dmd_v4l2_enc_frame(struct dmd_v4l2_enc *e, struct dmd_surface *surface,
         surface->buf_width < (unsigned)((e->width + 127) & ~127) ||
         surface->buf_height < (unsigned)((e->height + 31) & ~31) ||
         surface->stride < (unsigned)((e->width + 127) & ~127) ||
-        surface->slice_height < (unsigned)((e->height + 31) & ~31))
+        surface->slice_height < (unsigned)((e->height + 31) & ~31)) {
+        V4L2_LOG("encoder input surface rejected: frame=%u surface=%ux%u buffer=%ux%u stride=%u slice=%u required=%dx%d format=0x%x",
+                 e->frame_number, surface->width, surface->height,
+                 surface->buf_width, surface->buf_height, surface->stride,
+                 surface->slice_height, e->width, e->height, surface->format);
         return -1;
+    }
 
     int input_fd = -1;
     void *temporary_map = NULL;
     unsigned frame_size = (unsigned)(((e->width + 127) & ~127) *
                                      ((e->height + 31) & ~31) * 3u / 2u);
-    if (frame_size > surface->data_size || e->input_size < frame_size)
+    if (frame_size > surface->data_size || e->input_size < frame_size) {
+        V4L2_LOG("encoder input allocation too small: frame=%u frame_size=%u surface_size=%zu input_size=%u",
+                 e->frame_number, frame_size, surface->data_size, e->input_size);
         return -1;
+    }
     /* Use a dma-heap buffer with the V4L2 negotiated size. DRM dumb buffers
      * can be shorter than msm_vidc's sizeimage and are rejected at QBUF. */
     input_fd = dmabuf_alloc(&e->alloc, e->input_size);
-    if (input_fd < 0) return -1;
+    if (input_fd < 0) {
+        V4L2_LOG("encoder dma-heap allocation failed: frame=%u size=%u: %s",
+                 e->frame_number, e->input_size, strerror(errno));
+        return -1;
+    }
     temporary_map = mmap(NULL, e->input_size, PROT_READ | PROT_WRITE,
                          MAP_SHARED, input_fd, 0);
     if (temporary_map == MAP_FAILED) {
@@ -1811,12 +1823,19 @@ int dmd_v4l2_enc_frame(struct dmd_v4l2_enc *e, struct dmd_surface *surface,
                       e->input_size, (uint64_t)e->frame_number * 33333ULL);
     if (temporary_map) munmap(temporary_map, e->input_size);
     close(input_fd);
-    if (rc < 0) return -1;
+    if (rc < 0) {
+        V4L2_LOG("encoder OUTPUT queue failed: frame=%u", e->frame_number);
+        return -1;
+    }
 
     struct pollfd pfd = { .fd = e->fd, .events = POLLIN | POLLERR };
     int pr;
     do { pr = poll(&pfd, 1, 5000); } while (pr < 0 && errno == EINTR);
-    if (pr <= 0 || (pfd.revents & POLLERR) || !(pfd.revents & POLLIN)) return -1;
+    if (pr <= 0 || (pfd.revents & POLLERR) || !(pfd.revents & POLLIN)) {
+        V4L2_LOG("encoder CAPTURE wait failed: frame=%u poll=%d revents=0x%x errno=%s",
+                 e->frame_number, pr, pfd.revents, strerror(errno));
+        return -1;
+    }
 
     struct v4l2_buffer v;
     struct v4l2_plane p[VIDEO_MAX_PLANES];
@@ -1827,12 +1846,17 @@ int dmd_v4l2_enc_frame(struct dmd_v4l2_enc *e, struct dmd_surface *surface,
     v.m.planes = p;
     v.length = 1;
     if (xioctl(e->fd, VIDIOC_DQBUF, &v, "encoder DQBUF(CAPTURE)") < 0 ||
-        v.index >= (unsigned)e->n_cap)
+        v.index >= (unsigned)e->n_cap) {
+        V4L2_LOG("encoder CAPTURE dequeue invalid: frame=%u index=%u count=%d",
+                 e->frame_number, v.index, e->n_cap);
         return -1;
+    }
     struct dmd_v4l2_buf *cap = &e->alloc.cap[v.index];
     cap->queued = 0;
     size_t n = p[0].bytesused;
     if (n > dst_capacity) {
+        V4L2_LOG("encoder CAPTURE packet too large: frame=%u bytes=%zu capacity=%zu",
+                 e->frame_number, n, dst_capacity);
         enc_qbuf(e, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, (int)v.index,
                  cap, 0, 0);
         return -1;
@@ -1842,8 +1866,11 @@ int dmd_v4l2_enc_frame(struct dmd_v4l2_enc *e, struct dmd_surface *surface,
     *dst_pts_us = (uint64_t)v.timestamp.tv_sec * 1000000ULL +
                   (uint64_t)v.timestamp.tv_usec;
     if (enc_qbuf(e, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, (int)v.index,
-                 cap, 0, 0) < 0)
+                 cap, 0, 0) < 0) {
+        V4L2_LOG("encoder CAPTURE requeue failed: frame=%u index=%u",
+                 e->frame_number, v.index);
         return -1;
+    }
 
     memset(&v, 0, sizeof(v));
     memset(p, 0, sizeof(p));
@@ -1861,13 +1888,20 @@ int dmd_v4l2_enc_frame(struct dmd_v4l2_enc *e, struct dmd_surface *surface,
         do { pr = poll(&pfd, 1, 5000); } while (pr < 0 && errno == EINTR);
         if (pr <= 0 || (pfd.revents & POLLERR) ||
             !(pfd.revents & POLLOUT) ||
-            xioctl(e->fd, VIDIOC_DQBUF, &v, "encoder DQBUF(OUTPUT)") < 0)
+            xioctl(e->fd, VIDIOC_DQBUF, &v, "encoder DQBUF(OUTPUT)") < 0) {
+            V4L2_LOG("encoder OUTPUT wait/dequeue failed: frame=%u poll=%d revents=0x%x errno=%s",
+                     e->frame_number, pr, pfd.revents, strerror(errno));
             return -1;
+        }
     } else if (dqrc < 0) {
         V4L2_LOG("encoder DQBUF(OUTPUT) failed: %s", strerror(errno));
         return -1;
     }
-    if (v.index >= (unsigned)e->n_out) return -1;
+    if (v.index >= (unsigned)e->n_out) {
+        V4L2_LOG("encoder OUTPUT index out of range: frame=%u index=%u count=%d",
+                 e->frame_number, v.index, e->n_out);
+        return -1;
+    }
     e->frame_number++;
     (void)src;
     (void)src_size;

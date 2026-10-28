@@ -145,6 +145,10 @@ VAStatus dmd_encode_render(VADriverContextP ctx, VAContextID context,
                        b->size >= sizeof(c->enc_h264_pic)) {
                 memcpy(&c->enc_h264_pic, b->data, sizeof(c->enc_h264_pic));
                 c->have_enc_pic = 1;
+                if ((c->enc_rate_control & VA_RC_CQP) &&
+                    c->enc_h264_pic.pic_init_qp >= 1 &&
+                    c->enc_h264_pic.pic_init_qp <= 51)
+                    c->enc_qp = c->enc_h264_pic.pic_init_qp;
             }
         } else if (c->codec == DMD_CODEC_HEVC) {
             if (b->type == VAEncSequenceParameterBufferType &&
@@ -155,6 +159,10 @@ VAStatus dmd_encode_render(VADriverContextP ctx, VAContextID context,
                        b->size >= sizeof(c->enc_hevc_pic)) {
                 memcpy(&c->enc_hevc_pic, b->data, sizeof(c->enc_hevc_pic));
                 c->have_enc_pic = 1;
+                if ((c->enc_rate_control & VA_RC_CQP) &&
+                    c->enc_hevc_pic.pic_init_qp >= 1 &&
+                    c->enc_hevc_pic.pic_init_qp <= 51)
+                    c->enc_qp = c->enc_hevc_pic.pic_init_qp;
             }
         }
         if (b->type == VAEncMiscParameterBufferType &&
@@ -184,11 +192,14 @@ VAStatus dmd_encode_end(VADriverContextP ctx, VAContextID context)
     pthread_mutex_lock(&drv->lock);
     struct dmd_context *c = dmd_find_context_locked(drv, context);
     if (!c || c->entrypoint != VAEntrypointEncSlice) {
+        dmd_log("encode EndPicture: invalid context %u\n", (unsigned)context);
         pthread_mutex_unlock(&drv->lock);
         return VA_STATUS_ERROR_INVALID_CONTEXT;
     }
     if (c->current_target == VA_INVALID_ID || !c->have_enc_pic ||
         !c->have_enc_seq) {
+        dmd_log("encode EndPicture: incomplete picture target=%u have_pic=%d have_seq=%d\n",
+                (unsigned)c->current_target, c->have_enc_pic, c->have_enc_seq);
         pthread_mutex_unlock(&drv->lock);
         return VA_STATUS_ERROR_INVALID_CONTEXT;
     }
@@ -198,6 +209,9 @@ VAStatus dmd_encode_end(VADriverContextP ctx, VAContextID context)
     struct dmd_buffer *coded = dmd_find_buffer_locked(drv, coded_id);
     struct dmd_surface *surface = dmd_find_surface_locked(drv, c->current_target);
     if (!coded || coded->type != VAEncCodedBufferType || !surface) {
+        dmd_log("encode EndPicture: coded buffer/surface missing coded=%d type=%d surface=%d\n",
+                coded != NULL, coded ? (int)coded->type : -1,
+                surface != NULL);
         pthread_mutex_unlock(&drv->lock);
         return VA_STATUS_ERROR_INVALID_BUFFER;
     }
@@ -290,6 +304,8 @@ VAStatus dmd_encode_end(VADriverContextP ctx, VAContextID context)
     pthread_mutex_lock(&drv->lock);
     c = dmd_find_context_locked(drv, context);
     if (!c || c->encode_drained) {
+        dmd_log("encode EndPicture: context disappeared or is drained (context=%u)\n",
+                (unsigned)context);
         if (c) {
             c->current_target = VA_INVALID_ID;
             drv->io_busy[context_index] = 0;
@@ -307,6 +323,8 @@ VAStatus dmd_encode_end(VADriverContextP ctx, VAContextID context)
         }
     }
     if (pending_slot < 0) {
+        dmd_log("encode EndPicture: pending output table full (context=%u)\n",
+                (unsigned)context);
         drv->io_busy[context_index] = 0;
         pthread_cond_broadcast(&drv->io_done);
         c->current_target = VA_INVALID_ID;
@@ -340,6 +358,9 @@ VAStatus dmd_encode_end(VADriverContextP ctx, VAContextID context)
     }
     c->current_target = VA_INVALID_ID;
     if (rc < 0 || coded_size > UINT32_MAX) {
+        dmd_log("encode EndPicture: V4L2 frame failed (codec=%d frame=%llu rc=%d coded_size=%zu)\n",
+                c->codec, (unsigned long long)c->encode_frame_count, rc,
+                coded_size);
         c->encode_pending[pending_slot].in_use = 0;
         pthread_mutex_unlock(&drv->lock);
         free(scratch);
