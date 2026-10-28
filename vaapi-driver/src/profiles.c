@@ -289,10 +289,11 @@ static uint32_t rt_formats_for_profile(VAProfile profile)
 static uint32_t enc_rate_control_for_profile(VAProfile profile)
 {
     uint32_t modes = VA_RC_CBR | VA_RC_VBR;
-    /* msm_vidc exposes the QP controls needed to emulate CQP for H.264. The
-     * current HEVC path has no equivalent fixed-QP mapping. */
+    /* msm_vidc exposes per-frame QP controls for both H.264 and HEVC. The
+     * backend maps VAAPI CQP onto VBR with those QP bounds pinned. */
     if (profile == VAProfileH264ConstrainedBaseline ||
-        profile == VAProfileH264Main || profile == VAProfileH264High)
+        profile == VAProfileH264Main || profile == VAProfileH264High ||
+        profile == VAProfileHEVCMain)
         modes |= VA_RC_CQP;
     return modes;
 }

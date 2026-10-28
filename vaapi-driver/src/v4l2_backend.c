@@ -1457,6 +1457,15 @@ static void enc_set_ctrl(int fd, uint32_t id, int value, const char *name)
                  value, strerror(errno));
 }
 
+static int enc_has_ctrl(int fd, uint32_t id)
+{
+    struct v4l2_queryctrl q;
+    memset(&q, 0, sizeof(q));
+    q.id = id;
+    return ioctl(fd, VIDIOC_QUERYCTRL, &q) == 0 &&
+           !(q.flags & V4L2_CTRL_FLAG_DISABLED);
+}
+
 void dmd_v4l2_enc_set_controls(struct dmd_v4l2_enc *e,
                                unsigned int bitrate, unsigned int gop)
 {
@@ -1650,6 +1659,29 @@ struct dmd_v4l2_enc *dmd_v4l2_enc_open(int codec, VAProfile profile,
                          (int)qp, "h264_minimum_qp_value");
             enc_set_ctrl(e->fd, V4L2_CID_MPEG_VIDEO_H264_MAX_QP,
                          (int)qp, "h264_maximum_qp_value");
+        }
+    } else if (codec == DMD_V4L2_CODEC_HEVC && cqp) {
+        /* Some msm_vidc platforms expose HEVC QP controls and some (including
+         * the SM8750 node) expose only H.264 QP controls. Use native fixed QP
+         * where the complete control set exists; otherwise retain the valid
+         * VBR fallback configured above so VAAPI's -qp mode can still run. */
+        uint32_t ids[] = {
+            V4L2_CID_MPEG_VIDEO_HEVC_I_FRAME_QP,
+            V4L2_CID_MPEG_VIDEO_HEVC_P_FRAME_QP,
+            V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP,
+            V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP,
+        };
+        int have_all = 1;
+        for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++)
+            have_all &= enc_has_ctrl(e->fd, ids[i]);
+        if (have_all) {
+            enc_set_ctrl(e->fd, ids[0], (int)qp, "hevc_i_frame_qp_value");
+            enc_set_ctrl(e->fd, ids[1], (int)qp, "hevc_p_frame_qp_value");
+            enc_set_ctrl(e->fd, ids[2], (int)qp, "hevc_minimum_qp_value");
+            enc_set_ctrl(e->fd, ids[3], (int)qp, "hevc_maximum_qp_value");
+        } else {
+            V4L2_LOG("HEVC CQP controls unavailable; using VBR fallback at %u bps",
+                     bitrate ? bitrate : 2000000);
         }
     }
 
