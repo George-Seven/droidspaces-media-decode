@@ -84,6 +84,35 @@ libva expects the filename `msm_drm_drv_video.so` for the msm render node. Use
 `LIBVA_DRIVERS_PATH` to select a separate build without replacing the system
 copy.
 
+### Build an installable Debian package
+
+On the target arm64 system, install the native build dependencies (`build-essential`,
+`pkg-config`, `libva-dev`, `libdrm-dev`, `libgbm-dev`, and `dpkg-dev`), then run:
+
+```sh
+tools/build-deb.sh
+sudo apt install ./dist/droidspaces-msm-vaapi_0.1.0_arm64.deb
+```
+
+The package builds and installs the AV1 and HEVC Main10 enabled VA-API driver
+under the multiarch libva driver directory, the optional GBM adapter in a
+private directory, and `/usr/bin/chrome-msm-vaapi`. The launcher sets
+`LIBVA_DRIVER_NAME=msm_drm`, the installed driver search path,
+`MESA_LOADER_DRIVER_OVERRIDE=kgsl`, and `TU_DEBUG=noconform`; it adds the
+private GBM directory to `LD_LIBRARY_PATH` only for Chrome. It launches through
+Wayland with the tested ANGLE OpenGL and VA-API decoder/encoder flags. Run it
+from the logged-in graphical user session:
+
+```sh
+chrome-msm-vaapi
+```
+
+The GBM adapter is included for Chrome WebCodecs H.264 encoding. FFmpeg VA-API
+encoding does not use it. The launcher expects the render node at
+`/dev/dri/renderD128` and a compatible arm64 Chrome or Chromium installation.
+It does not modify system Chrome desktop entries or global library search
+paths. Set `CHROME_BIN` to select a different browser executable.
+
 ## FFmpeg encoding and processing
 
 Encode an H.264 clip after converting the source to NV12 and uploading it to

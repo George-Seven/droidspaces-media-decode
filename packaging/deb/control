@@ -1,0 +1,11 @@
+Package: droidspaces-msm-vaapi
+Version: 0.1.0
+Section: video
+Priority: optional
+Architecture: arm64
+Maintainer: George-Seven <uploadtodrive707@gmail.com>
+Depends: libc6, libva2, libva-drm2, libgbm1
+Description: Qualcomm msm_vidc VA-API driver and Chrome launcher
+ Hardware video decoding and encoding through Qualcomm msm_vidc V4L2
+ interfaces, with AV1 and HEVC Main10 enabled. Installs a Chrome launcher
+ that configures Wayland VA-API playback and WebCodecs H.264 encoding.

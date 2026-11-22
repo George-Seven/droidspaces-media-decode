@@ -20,6 +20,7 @@ core.[0-9]*
 # Anchor these patterns so a source directory of the same name is still tracked.
 /build/
 /client/build/
+/dist/*.deb
 
 # Editor and IDE files
 .vscode/

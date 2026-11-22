@@ -1,0 +1,52 @@
+#!/bin/sh
+# Chrome launcher installed by droidspaces-msm-vaapi.
+
+set -eu
+
+MULTIARCH='@MULTIARCH@'
+DRIVER_DIR="/usr/lib/$MULTIARCH/dri"
+GBM_COMPAT_DIR="/usr/lib/$MULTIARCH/droidspaces-gbm"
+
+if [ -n "${CHROME_BIN:-}" ]; then
+    chrome=$CHROME_BIN
+elif [ -x /usr/bin/google-chrome-stable ]; then
+    chrome=/usr/bin/google-chrome-stable
+elif [ -x /usr/bin/google-chrome ]; then
+    chrome=/usr/bin/google-chrome
+elif [ -x /usr/bin/chromium ]; then
+    chrome=/usr/bin/chromium
+else
+    echo 'Chrome/Chromium not found; set CHROME_BIN to its executable.' >&2
+    exit 127
+fi
+
+if [ ! -x "$chrome" ]; then
+    echo "Browser executable is not executable: $chrome" >&2
+    exit 127
+fi
+
+# Scope the adapter and VA-API settings to this browser process tree.
+export MESA_LOADER_DRIVER_OVERRIDE="${MESA_LOADER_DRIVER_OVERRIDE:-kgsl}"
+export TU_DEBUG="${TU_DEBUG:-noconform}"
+export LIBVA_DRIVER_NAME="${LIBVA_DRIVER_NAME:-msm_drm}"
+export LIBVA_DRIVERS_PATH="${LIBVA_DRIVERS_PATH:-$DRIVER_DIR}"
+if [ -r "$GBM_COMPAT_DIR/libgbm.so.1" ]; then
+    case ":${LD_LIBRARY_PATH:-}:" in
+        *":$GBM_COMPAT_DIR:"*) ;;
+        *) export LD_LIBRARY_PATH="$GBM_COMPAT_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+    esac
+fi
+
+# Keep enable-features as one option. Do not enable Chromium's Vulkan feature;
+# ANGLE uses OpenGL on the tested GNOME Wayland configuration.
+set -- \
+    --ozone-platform=wayland \
+    --render-node-override=/dev/dri/renderD128 \
+    --use-gl=angle \
+    --use-angle=gl \
+    --ignore-gpu-blocklist \
+    --enable-features=AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,VaapiVideoDecodeLinux,VaapiVideoDecoder,VaapiVideoDecodeLinuxGL,VaapiIgnoreDriverChecks,PlatformHEVCDecoderSupport,AcceleratedVideoEncoder \
+    --disable-features=ResolutionBasedDecoderPriority \
+    "$@"
+
+exec "$chrome" "$@"
