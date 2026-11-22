@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+if [ "$1" = configure ]; then
+    /usr/bin/configure-firefox-vaapi --install-system-policy --package-managed ||
+        echo 'Could not configure Firefox policy automatically. See the Firefox setup guide.' >&2
+fi

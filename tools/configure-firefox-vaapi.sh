@@ -2,7 +2,7 @@
 # Current-user launcher/desktop integration and one explicit root-owned policy.
 # No profile rewrites, daemon checks, or sandbox-disabling defaults.
 set -eu
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+script_dir=$(dirname -- "$(readlink -f -- "$0")")
 exec python3 - "$script_dir/../vaapi-driver/tools/firefox-hwdec" "$@" <<'PY'
 import argparse
 import hashlib
@@ -18,6 +18,8 @@ import tempfile
 TEMPLATE = Path(sys.argv.pop(1))
 PREF = 'dom.ipc.forkserver.enable'
 VALUE = {'Value': False, 'Status': 'locked'}
+DISTRIBUTION_POLICY = Path('/usr/lib/firefox/distribution/policies.json')
+SYSTEM_POLICY = Path('/etc/firefox/policies/policies.json')
 TAG = '# Managed by configure-firefox-vaapi.sh (explicit RDD KGSL compatibility policy)'
 
 def fail(message):
@@ -70,16 +72,18 @@ def policy_ok(path):
     prefs = policies.get('Preferences', {}) if isinstance(policies, dict) else {}
     return isinstance(prefs, dict) and prefs.get(PREF) == VALUE
 
-def manage_policy(path, remove):
+def manage_policy(path, remove, package_managed=False, enforce=False):
     if os.geteuid() != 0:
         fail('System policy changes require root. Use --install-system-policy as root.')
     state_path = path.with_name(path.name + '.dmd-firefox-state.json')
-    backup = path.with_name(path.name + '.dmd-firefox.bak')
     state = load_json(state_path)
+    managed_by_package = state.get('package_managed', False) if state else package_managed
+    suffix = '.dmd-firefox-package.bak' if managed_by_package else '.dmd-firefox.bak'
+    backup = path.with_name(path.name + suffix)
     data = load_json(path, {})
     if remove:
-        if state is None:
-            print(f'No managed policy state; preserving {path}')
+        if state is None or (package_managed and not managed_by_package):
+            print(f'No matching managed policy state; preserving {path}')
             return
         policies, prefs = policy_parts(data)
         if prefs.get(PREF) != VALUE:
@@ -100,19 +104,31 @@ def manage_policy(path, remove):
         else:
             atomic(path, encoded(data))
         state_path.unlink()
+        if managed_by_package:
+            backup.unlink(missing_ok=True)
         print(f'Removed only managed {PREF}; other policies preserved: {path}')
         return
     if state is not None:
         if not policy_ok(path):
-            fail('Managed preference changed elsewhere; reconcile it before reinstalling.')
+            if not enforce:
+                fail('Managed preference changed elsewhere; reconcile it before reinstalling.')
+            _, prefs = policy_parts(data)
+            prefs[PREF] = VALUE
+            atomic(path, encoded(data))
+            print(f'Reapplied locked {PREF}=false: {path}')
+            return
         print(f'Policy already installed: {path}')
         return
     had_policies = 'policies' in data
     had_preferences = isinstance(data.get('policies'), dict) and 'Preferences' in data['policies']
     policies, prefs = policy_parts(data)
+    if package_managed and PREF in prefs and (prefs[PREF] == VALUE or not enforce):
+        if prefs[PREF] != VALUE:
+            print(f'Preserving existing {PREF} in {path}; Firefox hardware decode requires it locked to false.', file=sys.stderr)
+        return
     state = {'had_file': path.exists(), 'had_policies': had_policies,
              'had_preferences': had_preferences, 'had_pref': PREF in prefs,
-             'previous_pref': prefs.get(PREF)}
+             'previous_pref': prefs.get(PREF), 'package_managed': package_managed}
     if path.exists():
         if backup.exists() or backup.is_symlink():
             fail(f'Archive the existing recovery backup before a new policy install: {backup}')
@@ -271,14 +287,32 @@ def main():
     group.add_argument('--verify', action='store_true')
     group.add_argument('--install-system-policy', action='store_true', help='root: merge the single locked forkserver preference')
     group.add_argument('--uninstall-system-policy', action='store_true', help='root: restore only that preference')
+    group.add_argument('--check-system-policy', action='store_true', help='check the locked forkserver preference')
+    parser.add_argument('--package-managed', action='store_true',
+                        help='use the active native Firefox policy and track package-owned changes')
+    parser.add_argument('--enforce', action='store_true',
+                        help='replace a conflicting forkserver preference and retain its original value')
     parser.add_argument('--compat-lib', default=os.environ.get('DMD_FIREFOX_HEAP_LIB', '/usr/local/lib/droidspaces-firefox/libdmd-firefox-compat.so'))
-    parser.add_argument('--policy-file', type=Path, default=Path('/usr/lib/firefox/distribution/policies.json'), help='policy path in this native Firefox installation')
+    parser.add_argument('--policy-file', type=Path, help='override the native Firefox policy path')
     parser.add_argument('--desktop-dir', action='append', help='vendor applications directory (repeatable)')
     args = parser.parse_args()
+    has_explicit_policy = args.policy_file is not None
+    if not has_explicit_policy:
+        args.policy_file = DISTRIBUTION_POLICY
+        if args.package_managed and (SYSTEM_POLICY.exists() or SYSTEM_POLICY.is_symlink()):
+            args.policy_file = SYSTEM_POLICY
     if not args.policy_file.is_absolute():
         fail('--policy-file must be absolute')
-    if args.install_system_policy or args.uninstall_system_policy:
-        manage_policy(args.policy_file, args.uninstall_system_policy)
+    if args.enforce and not args.install_system_policy:
+        parser.error('--enforce requires --install-system-policy')
+    if args.check_system_policy:
+        raise SystemExit(0 if policy_ok(args.policy_file) else 1)
+    if args.uninstall_system_policy and args.package_managed and not has_explicit_policy:
+        # The active policy location can change after the package was installed.
+        for path in (SYSTEM_POLICY, DISTRIBUTION_POLICY):
+            manage_policy(path, remove=True, package_managed=True)
+    elif args.install_system_policy or args.uninstall_system_policy:
+        manage_policy(args.policy_file, args.uninstall_system_policy, args.package_managed, args.enforce)
     elif args.uninstall:
         uninstall_user()
     elif args.verify:

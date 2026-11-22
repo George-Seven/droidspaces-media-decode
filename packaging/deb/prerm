@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+if [ "$1" = remove ]; then
+    /usr/bin/configure-firefox-vaapi --uninstall-system-policy --package-managed ||
+        echo 'Could not restore the Firefox policy. The current file and any backup were preserved.' >&2
+fi

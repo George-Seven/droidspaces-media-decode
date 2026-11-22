@@ -7,6 +7,7 @@
 set -eu
 compat_lib=${DMD_FIREFOX_HEAP_LIB:-/usr/local/lib/droidspaces-firefox/libdmd-firefox-compat.so}
 firefox_bin=${DMD_FIREFOX_BIN:-/usr/bin/firefox}
+policy_tool=''
 fail() { printf 'firefox-hwdec: %s\n' "$*" >&2; exit 1; }
 case "$compat_lib" in /*) ;; *) fail 'DMD_FIREFOX_HEAP_LIB must be absolute' ;; esac
 case "$compat_lib" in *[[:space:]:]*) fail 'preload path cannot contain whitespace/colons' ;; esac
@@ -30,13 +31,25 @@ printf '%s\n' "$firefox_version" | LC_ALL=C grep -Eq '(^|[[:space:]])Firefox[[:s
 if [ "${1:-}" = '--dmd-check' ]; then
     printf 'Firefox: %s (%s)\nRDD compatibility preload: %s\n' "$firefox_bin" "$firefox_version" "$compat_lib"
     printf '%s\n' 'Adds the explicit RDD KGSL ioctl policy; Mozilla sandboxes are not disabled.'
-    printf '%s\n' 'Requires locked dom.ipc.forkserver.enable=false; run configure-firefox-vaapi.sh --verify.'
+    printf '%s\n' 'Requires locked dom.ipc.forkserver.enable=false. See the Firefox setup guide.'
     exit 0
 fi
 [ "$(id -u)" -ne 0 ] || fail 'launch Firefox as the desktop user, not root'
+if [ -n "$policy_tool" ] && ! "$policy_tool" --check-system-policy --package-managed; then
+    command -v sudo >/dev/null 2>&1 ||
+        fail "run $policy_tool --install-system-policy --package-managed --enforce as root first"
+    sudo "$policy_tool" --install-system-policy --package-managed --enforce ||
+        fail 'the required Firefox policy could not be configured'
+    "$policy_tool" --check-system-policy --package-managed ||
+        fail 'the required Firefox policy is not active'
+fi
 # Override inherited kgsl/zink only for this process and its children.
 export MESA_LOADER_DRIVER_OVERRIDE=msm
-export MOZ_ENABLE_WAYLAND=1
+case "${DMD_FIREFOX_DISPLAY:-wayland}" in
+    wayland) export MOZ_ENABLE_WAYLAND=1 ;;
+    x11) export MOZ_ENABLE_WAYLAND=0 GDK_BACKEND=x11 MOZ_X11_EGL=1 ;;
+    *) fail 'DMD_FIREFOX_DISPLAY must be wayland or x11' ;;
+esac
 export DMD_FIREFOX_KGSL=1
 # Preserve all inherited preload libraries; do not set a global library path.
 export LD_PRELOAD="$compat_lib${LD_PRELOAD:+:$LD_PRELOAD}"

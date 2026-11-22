@@ -91,7 +91,7 @@ On the target arm64 system, install the native build dependencies (`build-essent
 
 ```sh
 tools/build-deb.sh
-sudo apt install ./dist/droidspaces-msm-vaapi_0.1.0_arm64.deb
+sudo apt install ./dist/droidspaces-msm-vaapi_0.2.2_arm64.deb
 ```
 
 The package builds and installs the AV1 and HEVC Main10 enabled VA-API driver
@@ -177,6 +177,26 @@ See the [browser guide](doc/browser-vaapi-guide.md) for the exact flags, Vulkan
 comparisons, and compositor requirements.
 
 ### Firefox
+
+The Debian package includes `firefox-msm-vaapi` for native arm64 Firefox 160.
+It uses X11 with EGL, which runs through XWayland on GNOME Wayland. The package
+sets the required Firefox policy when the preference is unset. Fully exit
+Firefox, then start the launcher as the desktop user.
+
+```sh
+firefox-msm-vaapi --dmd-check
+firefox-msm-vaapi
+```
+
+Launching with `firefox-msm-vaapi` opts in to locking
+`dom.ipc.forkserver.enable=false` across all profiles of the native Firefox
+installation. The launcher uses `sudo` if it must add or replace the value in
+the active policy. Package removal restores the previous value when the
+package changed it. The launcher inherits the desktop session's X11 display
+and credentials.
+
+For a manual build, the following setup uses native Wayland by default.
+Set `DMD_FIREFOX_DISPLAY=x11` when launching to select X11 with EGL.
 
 The tested native Firefox 160 AArch64/glibc setup uses the
 [RDD compatibility launcher](doc/firefox-sandbox.md). Build it with
