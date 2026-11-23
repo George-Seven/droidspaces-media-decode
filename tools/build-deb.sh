@@ -4,8 +4,9 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+PACKAGING="$ROOT/packaging/driver"
 PACKAGE=droidspaces-msm-vaapi
-VERSION=${1:-${DMD_PACKAGE_VERSION:-0.2.2}}
+VERSION=${1:-${DMD_PACKAGE_VERSION:-0.2.4}}
 OUT_DIR=${2:-"$ROOT/dist"}
 ARCH=$(dpkg-architecture -qDEB_HOST_ARCH)
 MULTIARCH=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
@@ -58,9 +59,11 @@ install -m 0644 "$DRIVER_BUILD/msm_drm_drv_video.so" \
     "$STAGE/usr/lib/$MULTIARCH/dri/msm_drm_drv_video.so"
 install -m 0644 "$GBM_BUILD/libgbm.so.1" \
     "$STAGE/usr/lib/$MULTIARCH/droidspaces-gbm/libgbm.so.1"
-sed "s|@MULTIARCH@|$MULTIARCH|g" "$ROOT/packaging/deb/chrome-msm-vaapi.in" \
+sed "s|@MULTIARCH@|$MULTIARCH|g" "$PACKAGING/chrome-msm-vaapi.in" \
     > "$STAGE/usr/bin/chrome-msm-vaapi"
 chmod 0755 "$STAGE/usr/bin/chrome-msm-vaapi"
+install -m 0755 "$ROOT/tools/configure-jellyfin-vaapi.sh" \
+    "$STAGE/usr/bin/configure-jellyfin-vaapi"
 install -m 0644 "$FIREFOX_BUILD/libdmd-firefox-compat.so" "$STAGE$FIREFOX_LIB"
 sed -e "s|/usr/local/lib/droidspaces-firefox/libdmd-firefox-compat.so|$FIREFOX_LIB|g" \
     -e 's/DMD_FIREFOX_DISPLAY:-wayland/DMD_FIREFOX_DISPLAY:-x11/' \
@@ -79,9 +82,9 @@ install -m 0644 "$ROOT/vaapi-driver/gbm-compat/README.md" \
     "$STAGE/usr/share/doc/$PACKAGE/gbm-compat.md"
 install -m 0644 "$ROOT/doc/firefox-sandbox.md" "$STAGE/usr/share/doc/$PACKAGE/firefox-sandbox.md"
 
-sed "s/^Version:.*/Version: $VERSION/" "$ROOT/packaging/deb/control" > "$DEBIAN/control"
+sed "s/^Version:.*/Version: $VERSION/" "$PACKAGING/control" > "$DEBIAN/control"
 chmod 0644 "$DEBIAN/control"
-install -m 0755 "$ROOT/packaging/deb/postinst" "$ROOT/packaging/deb/prerm" "$DEBIAN/"
+install -m 0755 "$PACKAGING/postinst" "$PACKAGING/prerm" "$DEBIAN/"
 
 OUTPUT="$OUT_DIR/${PACKAGE}_${VERSION}_${ARCH}.deb"
 dpkg-deb --root-owner-group --build "$STAGE" "$OUTPUT"

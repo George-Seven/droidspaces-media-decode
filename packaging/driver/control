@@ -1,5 +1,5 @@
 Package: droidspaces-msm-vaapi
-Version: 0.2.2
+Version: 0.2.4
 Section: video
 Priority: optional
 Architecture: arm64
@@ -10,3 +10,4 @@ Description: Qualcomm msm_vidc VA-API driver and browser launchers
  interfaces, with AV1 and HEVC Main10 enabled. Installs a Chrome launcher
  that configures Wayland VA-API playback and WebCodecs H.264 encoding, and a
  native Firefox 160 launcher with X11 EGL playback and RDD compatibility.
+ Includes a helper to configure a native Jellyfin systemd service for VA-API.

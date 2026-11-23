@@ -91,7 +91,7 @@ On the target arm64 system, install the native build dependencies (`build-essent
 
 ```sh
 tools/build-deb.sh
-sudo apt install ./dist/droidspaces-msm-vaapi_0.2.2_arm64.deb
+sudo apt install ./dist/droidspaces-msm-vaapi_0.2.4_arm64.deb
 ```
 
 The package builds and installs the AV1 and HEVC Main10 enabled VA-API driver
@@ -138,6 +138,31 @@ LIBVA_DRIVER_NAME=msm_drm ffmpeg \
 Scaling and rotation operate on CPU-backed NV12 surfaces. See the
 [driver README](vaapi-driver/README.md) for the rotation example and the
 [encoding guide](doc/hardware-encoding.md) for crop and alignment details.
+
+## Jellyfin
+
+For a native Jellyfin service on the target arm64 system, install the Debian
+package and run:
+
+```sh
+sudo configure-jellyfin-vaapi
+```
+
+The script installs a systemd drop-in that sets `LIBVA_DRIVER_NAME=msm_drm` and
+`LIBVA_DRIVERS_PATH=/usr/lib/aarch64-linux-gnu/dri` for Jellyfin and its FFmpeg
+processes. It grants the service the `droidspaces-gpu` supplementary group for
+access to the render node, V4L2 devices, and DMA heap. Use `--driver-dir DIR`
+to select another system directory that the service can read. An active
+service is restarted so it picks up the new settings.
+
+In **Dashboard → Playback → Transcoding**, select **VA-API** and set the
+device to `/dev/dri/renderD128`. Select the decoder codecs supported by
+your hardware and enable hardware encoding if needed. Leave low power
+encoding and hardware tone mapping disabled for this driver. Trigger a
+transcode and check its FFmpeg log for VA-API, such as `h264_vaapi` when
+encoding H.264. Use `sudo configure-jellyfin-vaapi --remove` to remove the
+drop-in. For a manual driver install, run
+`sudo bash tools/configure-jellyfin-vaapi.sh` from the repository.
 
 ## Browser setup
 
