@@ -1,0 +1,27 @@
+diff --git a/fftools/ffmpeg_enc.c b/fftools/ffmpeg_enc.c
+index a595912..c1adce2 100644
+--- a/fftools/ffmpeg_enc.c
++++ b/fftools/ffmpeg_enc.c
+@@ -251,6 +251,22 @@ int enc_open(void *opaque, const AVFrame *frame)
+ 
+         enc_ctx->pix_fmt = frame->format;
+ 
++        /* Some VFR files report the demuxer clock as the guessed frame rate.
++         * Keep the encoder time base for PTS and use the measured average
++         * for VAAPI rate control and the stream's nominal frame rate. */
++        if (enc_ctx->pix_fmt == AV_PIX_FMT_VAAPI && ist &&
++            av_cmp_q(enc_ctx->framerate, (AVRational){ 1000, 1 }) > 0 &&
++            av_cmp_q(enc_ctx->framerate, av_inv_q(ist->st->time_base)) == 0) {
++            AVRational average = ist->st->avg_frame_rate;
++            if (average.num > 0 && average.den > 0 &&
++                av_cmp_q(average, (AVRational){ 1000, 1 }) <= 0) {
++                av_log(e, AV_LOG_VERBOSE,
++                       "Using measured average %d/%d for VAAPI rate control\n",
++                       average.num, average.den);
++                enc_ctx->framerate = average;
++            }
++        }
++
+         if (ost->bits_per_raw_sample)
+             enc_ctx->bits_per_raw_sample = ost->bits_per_raw_sample;
+         else

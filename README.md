@@ -164,6 +164,11 @@ encoding H.264. Use `sudo configure-jellyfin-vaapi --remove` to remove the
 drop-in. For a manual driver install, run
 `sudo bash tools/configure-jellyfin-vaapi.sh` from the repository.
 
+To build the patched Jellyfin server and FFmpeg packages, use
+`packaging/jellyfin/build.sh all` on an ARM64 Docker host. The build writes
+both packages to `dist/jellyfin/`. See the
+[Jellyfin packaging guide](packaging/jellyfin/README.md) for the included patches.
+
 ## Browser setup
 
 ### Chrome on GNOME Wayland

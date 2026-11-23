@@ -1,0 +1,47 @@
+diff --git a/libavformat/movenc.c b/libavformat/movenc.c
+index 9c49e3e..c881df9 100644
+--- a/libavformat/movenc.c
++++ b/libavformat/movenc.c
+@@ -23,6 +23,8 @@
+ 
+ #include "config_components.h"
+ 
++#include <math.h>
++#include <stdlib.h>
+ #include <stdint.h>
+ #include <inttypes.h>
+ 
+@@ -51,6 +53,7 @@
+ #include "libavutil/avstring.h"
+ #include "libavutil/channel_layout.h"
+ #include "libavutil/csp.h"
++#include "libavutil/display.h"
+ #include "libavutil/intfloat.h"
+ #include "libavutil/mathematics.h"
+ #include "libavutil/libm.h"
+@@ -3956,6 +3959,7 @@ static int mov_write_tkhd_tag(AVIOContext *pb, MOVMuxContext *mov,
+     int group   = 0;
+ 
+     uint32_t *display_matrix = NULL;
++    uint32_t display_matrix_from_metadata[9];
+     int       i;
+ 
+     if (mov->mode == MODE_AVIF)
+@@ -3976,6 +3980,17 @@ static int mov_write_tkhd_tag(AVIOContext *pb, MOVMuxContext *mov,
+                                      AV_PKT_DATA_DISPLAYMATRIX);
+         if (sd && sd->size == 9 * sizeof(*display_matrix))
+             display_matrix = (uint32_t *)sd->data;
++        if (!display_matrix) {
++            const AVDictionaryEntry *rotate = av_dict_get(st->metadata, "rotate", NULL, 0);
++            if (rotate) {
++                char *end;
++                double angle = strtod(rotate->value, &end);
++                if (end != rotate->value && !*end && isfinite(angle)) {
++                    av_display_rotation_set((int32_t *)display_matrix_from_metadata, -angle);
++                    display_matrix = display_matrix_from_metadata;
++                }
++            }
++        }
+     }
+ 
+     if (track->flags & MOV_TRACK_ENABLED)

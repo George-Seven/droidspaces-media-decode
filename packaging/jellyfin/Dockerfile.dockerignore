@@ -1,0 +1,8 @@
+**
+!packaging/
+!packaging/jellyfin/
+!packaging/jellyfin/build-in-container.sh
+!packaging/jellyfin/jellyfin-ffmpeg-8.1.3-rotate.patch
+!packaging/jellyfin/jellyfin-ffmpeg-8.1.3-vfr-vaapi.patch
+!patches/
+!patches/*.patch

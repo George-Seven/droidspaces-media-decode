@@ -21,6 +21,7 @@ core.[0-9]*
 /build/
 /client/build/
 /dist/*.deb
+/dist/jellyfin/
 
 # Editor and IDE files
 .vscode/
