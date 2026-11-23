@@ -757,14 +757,17 @@ static int configure_formats(struct dmd_v4l2_encoder *enc)
         (enc->nv12m && enc->input.planes < 2)) { errno = EPROTO; return -1; }
     enc->stride = fmt.fmt.pix_mp.plane_fmt[0].bytesperline;
     enc->slice_height = fmt.fmt.pix_mp.height;
+    if (enc->msm && (!enc->nv12m || !enc->stride)) {
+        /* Single-plane Venus NV12 starts UV after the luma rows aligned to
+         * 32. msm_vidc can return visible height even with a valid stride.
+         * sizeimage also includes allocation padding. */
+        if (enc->slice_height > UINT_MAX - 31u) { errno = EOVERFLOW; return -1; }
+        enc->slice_height = (enc->slice_height + 31u) & ~31u;
+    }
     if (!enc->stride) {
-        /* 4.14 msm_venc does not report bytesperline or padded scanlines.
-         * Linear Venus NV12: Y stride aligns to 128, scanlines to 32.  This
-         * is an ABI/layout fact; never derive scanlines from sizeimage,
-         * which includes UV alignment, extradata and allocation padding. */
+        /* Legacy msm_venc does not report bytesperline. */
         enc->stride = enc->msm ? (enc->cfg.width + 127u) & ~127u
                                : fmt.fmt.pix_mp.width;
-        if (enc->msm) enc->slice_height = (enc->cfg.height + 31u) & ~31u;
     }
     enc->uv_stride = enc->nv12m ? fmt.fmt.pix_mp.plane_fmt[1].bytesperline : enc->stride;
     if (!enc->uv_stride) enc->uv_stride = enc->stride;
